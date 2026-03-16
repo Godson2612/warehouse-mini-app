@@ -2,26 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  >
   <title>Request Submitted</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div class="page-shell">
-    <div class="card success-card">
-      <div class="success-icon">✓</div>
+    <div class="glass-bg"></div>
+
+    <div class="main-card success-card">
+      <div class="success-badge">✓</div>
       <h1>Request Submitted</h1>
-      <p class="success-text">{{ confirmation_message }}</p>
-      <p class="success-bp">BP Number: <strong>{{ bp_number }}</strong></p>
+      <p class="subtitle center-text">{{ confirmation_message }}</p>
+
+      <div class="success-panel">
+        <div class="success-row">
+          <span>BP Number</span>
+          <strong>{{ bp_number }}</strong>
+        </div>
+      </div>
 
       {% if export_note %}
-      <div class="notice-box soft">
-        <p>{{ export_note }}</p>
+      <div class="section-card">
+        <div class="section-title">Export Status</div>
+        <p class="status-text">{{ export_note }}</p>
       </div>
       {% endif %}
 
       <a href="{{ url_for('index') }}" class="primary-btn link-btn">Submit Another Request</a>
     </div>
   </div>
+
+  <script>
+    if (window.Telegram && window.Telegram.WebApp) {
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+      try { tg.setHeaderColor("#0f172a"); } catch (e) {}
+      try { tg.setBackgroundColor("#eef4ff"); } catch (e) {}
+      if (tg.disableVerticalSwipes) {
+        tg.disableVerticalSwipes();
+      }
+    }
+  </script>
 </body>
 </html>
