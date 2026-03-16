@@ -39,7 +39,13 @@ DATABASE_URL = normalize_database_url(
     os.getenv("DATABASE_URL", "sqlite:///warehouse_local.db")
 )
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    template_folder="template",
+    static_folder="statics",
+    static_url_path="/static",
+)
+
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-this-secret-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -579,4 +585,4 @@ with app.app_context():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
