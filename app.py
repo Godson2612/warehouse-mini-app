@@ -39,7 +39,7 @@ DATABASE_URL = normalize_database_url(
     os.getenv("DATABASE_URL", "sqlite:///warehouse_local.db")
 )
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder="template", static_folder="statics")
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-this-secret-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
