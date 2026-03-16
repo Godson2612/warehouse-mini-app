@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Request Submitted</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container center-page">
+    <div class="card large-card">
+      <div class="success-icon">✓</div>
+      <h1>Request Submitted Successfully</h1>
+      <p>Your request has been recorded.</p>
+      <p><strong>BP Number:</strong> {{ bp_number }}</p>
+      <a class="primary-btn link-btn" href="/">Submit Another Request</a>
+    </div>
+  </div>
+</body>
+</html>

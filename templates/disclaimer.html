@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warehouse Equipment Request</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container center-page">
+    <div class="card large-card">
+      <div class="brand">Warehouse Equipment Request</div>
+      <h1>Warehouse Rules & Mandatory Disclaimer</h1>
+
+      <div class="warning-box">
+        <p><strong>WAREHOUSE CLOSES AT 9:00!</strong></p>
+        <p><strong>NO EXCEPTIONS!</strong></p>
+        <p><strong>BADGES ARE MANDATORY TO RECEIVE EQUIPMENT</strong></p>
+        <p><strong>MUST HAVE BADGE</strong></p>
+        <p><strong>CHECK YOUR BUFFER BEFORE YOU COME TO GET EQUIPMENT</strong></p>
+      </div>
+
+      <h2>Maximum Equipment Allowed</h2>
+      <ul class="rules-list">
+        <li>12 MODEMS</li>
+        <li>12 XI6</li>
+        <li>12 XID</li>
+        <li>5 XG2</li>
+        <li>5 DVR</li>
+        <li>2 ONU</li>
+      </ul>
+
+      <form method="POST" action="/accept">
+        <button class="primary-btn" type="submit">I Accept and Continue</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
