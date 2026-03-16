@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Warehouse Equipment Request</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='21') }}" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="app-scroll">
+      <div class="container center-page">
+        <div class="card card-wide">
+          <div class="badge">Warehouse Equipment Request</div>
+          <h1 class="page-title">Warehouse Rules & Mandatory Disclaimer</h1>
+          <p class="lead">Please review and accept all warehouse rules before continuing.</p>
+
+          <div class="warning-box">
+            <div class="warning-title">Important</div>
+            <p><strong>WAREHOUSE CLOSES AT 9:00 PM</strong></p>
+            <p><strong>NO EXCEPTIONS</strong></p>
+            <p><strong>BADGES ARE MANDATORY TO RECEIVE EQUIPMENT</strong></p>
+            <p><strong>MUST HAVE BADGE</strong></p>
+            <p><strong>CHECK YOUR BUFFER BEFORE YOU COME TO GET EQUIPMENT</strong></p>
+          </div>
+
+          <div class="section">
+            <div class="section-head">
+              <h2>Maximum Equipment Allowed</h2>
+            </div>
+            <ul class="rules-list">
+              <li>12 MODEMS</li>
+              <li>12 XI6</li>
+              <li>12 XID</li>
+              <li>5 XG2</li>
+              <li>5 DVR</li>
+              <li>2 ONU</li>
+            </ul>
+          </div>
+
+          <form method="POST" action="{{ url_for('accept') }}">
+            <button class="primary-btn" type="submit">I Accept and Continue</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js', v='21') }}"></script>
+</body>
+</html>

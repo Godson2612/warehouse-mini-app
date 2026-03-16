@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Equipment Request</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='21') }}" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    window.APP_LIMITS = {{ limits|tojson }};
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="app-scroll">
+      <div class="container">
+        <div class="card">
+          <div class="badge">Warehouse Equipment Request</div>
+          <h1 class="page-title">Submit Your Equipment Request</h1>
+          <p class="lead">Equipment requested today will be prepared for tomorrow’s pickup.</p>
+
+          {% if errors %}
+          <div class="error-box">
+            <div class="warning-title">Please correct the following</div>
+            {% for error in errors %}
+              <p>{{ error }}</p>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          <form method="POST" action="{{ url_for('submit_order') }}" id="requestForm" novalidate>
+            <input type="hidden" name="telegram_user_id" id="telegram_user_id" />
+            <input type="hidden" name="telegram_username" id="telegram_username" />
+            <input type="hidden" name="telegram_name" id="telegram_name" />
+            <input type="hidden" name="raw_telegram_data" id="raw_telegram_data" />
+
+            <div class="section first-section">
+              <div class="section-head">
+                <h2>Technician Details</h2>
+              </div>
+              <label for="bp_number">BP Number *</label>
+              <input
+                class="text-input"
+                type="text"
+                id="bp_number"
+                name="bp_number"
+                value="{{ form_values['bp_number'] }}"
+                autocomplete="off"
+                inputmode="text"
+                placeholder="Enter BP Number"
+                required
+              />
+            </div>
+
+            <div class="section">
+              <div class="section-head">
+                <h2>Modems</h2>
+                <span class="limit-chip">Max total: 12</span>
+              </div>
+              <div class="counter-grid">
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XB3</div>
+                    <div class="counter-subtitle">Modem</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xb3', -1, 12, 'modems')">−</button>
+                    <input class="qty-input" name="xb3" id="xb3" value="{{ form_values['xb3'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xb3', 1, 12, 'modems')">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XB6</div>
+                    <div class="counter-subtitle">Modem</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xb6', -1, 12, 'modems')">−</button>
+                    <input class="qty-input" name="xb6" id="xb6" value="{{ form_values['xb6'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xb6', 1, 12, 'modems')">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XB7</div>
+                    <div class="counter-subtitle">Modem</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xb7', -1, 12, 'modems')">−</button>
+                    <input class="qty-input" name="xb7" id="xb7" value="{{ form_values['xb7'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xb7', 1, 12, 'modems')">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XB8</div>
+                    <div class="counter-subtitle">Modem</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xb8', -1, 12, 'modems')">−</button>
+                    <input class="qty-input" name="xb8" id="xb8" value="{{ form_values['xb8'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xb8', 1, 12, 'modems')">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XB10</div>
+                    <div class="counter-subtitle">Modem</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xb10', -1, 12, 'modems')">−</button>
+                    <input class="qty-input" name="xb10" id="xb10" value="{{ form_values['xb10'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xb10', 1, 12, 'modems')">+</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="section">
+              <div class="section-head">
+                <h2>TV Boxes</h2>
+              </div>
+              <div class="counter-grid">
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XI6</div>
+                    <div class="counter-subtitle">Max 12</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xi6', -1, 12)">−</button>
+                    <input class="qty-input" name="xi6" id="xi6" value="{{ form_values['xi6'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xi6', 1, 12)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XID</div>
+                    <div class="counter-subtitle">Max 12</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xid', -1, 12)">−</button>
+                    <input class="qty-input" name="xid" id="xid" value="{{ form_values['xid'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xid', 1, 12)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XG2</div>
+                    <div class="counter-subtitle">Max 5</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xg2', -1, 5)">−</button>
+                    <input class="qty-input" name="xg2" id="xg2" value="{{ form_values['xg2'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xg2', 1, 5)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">DVR</div>
+                    <div class="counter-subtitle">XG1 / XG1 4K · Max 5</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('dvr', -1, 5)">−</button>
+                    <input class="qty-input" name="dvr" id="dvr" value="{{ form_values['dvr'] }}" readonly />
+                    <button type="button" onclick="adjustQty('dvr', 1, 5)">+</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="section">
+              <div class="section-head">
+                <h2>EPON</h2>
+              </div>
+              <div class="counter-grid">
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">ONU</div>
+                    <div class="counter-subtitle">Max 2</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('onu', -1, 2)">−</button>
+                    <input class="qty-input" name="onu" id="onu" value="{{ form_values['onu'] }}" readonly />
+                    <button type="button" onclick="adjustQty('onu', 1, 2)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">XER10</div>
+                    <div class="counter-subtitle">No warehouse cap</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('xer10', -1, 99)">−</button>
+                    <input class="qty-input" name="xer10" id="xer10" value="{{ form_values['xer10'] }}" readonly />
+                    <button type="button" onclick="adjustQty('xer10', 1, 99)">+</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="section">
+              <div class="section-head">
+                <h2>Home Security</h2>
+              </div>
+              <div class="counter-grid">
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">Camera</div>
+                    <div class="counter-subtitle">Accessory</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('camera', -1, 99)">−</button>
+                    <input class="qty-input" name="camera" id="camera" value="{{ form_values['camera'] }}" readonly />
+                    <button type="button" onclick="adjustQty('camera', 1, 99)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">Battery</div>
+                    <div class="counter-subtitle">Accessory</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('battery', -1, 99)">−</button>
+                    <input class="qty-input" name="battery" id="battery" value="{{ form_values['battery'] }}" readonly />
+                    <button type="button" onclick="adjustQty('battery', 1, 99)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">Sensor</div>
+                    <div class="counter-subtitle">Accessory</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('sensor', -1, 99)">−</button>
+                    <input class="qty-input" name="sensor" id="sensor" value="{{ form_values['sensor'] }}" readonly />
+                    <button type="button" onclick="adjustQty('sensor', 1, 99)">+</button>
+                  </div>
+                </div>
+
+                <div class="counter-card">
+                  <div>
+                    <div class="counter-title">Screen</div>
+                    <div class="counter-subtitle">Accessory</div>
+                  </div>
+                  <div class="counter">
+                    <button type="button" onclick="adjustQty('screen', -1, 99)">−</button>
+                    <input class="qty-input" name="screen" id="screen" value="{{ form_values['screen'] }}" readonly />
+                    <button type="button" onclick="adjustQty('screen', 1, 99)">+</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="section">
+              <div class="section-head">
+                <h2>Additional Equipment</h2>
+              </div>
+              <label for="extra_note">Description</label>
+              <input
+                class="text-input"
+                type="text"
+                id="extra_note"
+                name="extra_note"
+                value="{{ form_values['extra_note'] }}"
+                autocomplete="off"
+                placeholder="Describe the additional equipment"
+              />
+
+              <div class="counter-card extra-card">
+                <div>
+                  <div class="counter-title">Additional Quantity</div>
+                  <div class="counter-subtitle">Required description if quantity is greater than 0</div>
+                </div>
+                <div class="counter">
+                  <button type="button" onclick="adjustQty('extra_qty', -1, 99)">−</button>
+                  <input class="qty-input" name="extra_qty" id="extra_qty" value="{{ form_values['extra_qty'] }}" readonly />
+                  <button type="button" onclick="adjustQty('extra_qty', 1, 99)">+</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="submit-bar">
+              <button class="primary-btn" type="submit" id="submitBtn">Send Request to Warehouse</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js', v='21') }}"></script>
+</body>
+</html>
