@@ -2,11 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-  >
-  <title>Warehouse Request</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>New Warehouse Order</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -18,36 +15,88 @@
       <div class="brand-row">
         <div class="brand-badge">BP</div>
         <div>
-          <h1>Warehouse Rules & Disclaimer</h1>
-          <p class="subtitle">Please review and accept all warehouse rules before continuing.</p>
+          <h1>New Warehouse Order</h1>
+          <p class="subtitle">Complete the request below and submit it to the warehouse.</p>
         </div>
       </div>
 
-      <div class="section-card">
-        <div class="section-title">Important</div>
-        <div class="rules-grid">
-          <div class="rule-pill">Warehouse closes at 9:00 PM</div>
-          <div class="rule-pill">No exceptions</div>
-          <div class="rule-pill">Badge required to receive equipment</div>
-          <div class="rule-pill">Must have badge</div>
-          <div class="rule-pill">Check your buffer before pickup</div>
-        </div>
+      {% if errors %}
+      <div class="error-card">
+        {% for error in errors %}
+        <div class="error-line">{{ error }}</div>
+        {% endfor %}
       </div>
+      {% endif %}
 
-      <div class="section-card">
-        <div class="section-title">Maximum Equipment Allowed</div>
-        <div class="limits-grid">
-          <div class="limit-box"><span>Total Modems</span><strong>{{ limits.modems_total }}</strong></div>
-          <div class="limit-box"><span>XI6</span><strong>{{ limits.xi6 }}</strong></div>
-          <div class="limit-box"><span>XID</span><strong>{{ limits.xid }}</strong></div>
-          <div class="limit-box"><span>XG2</span><strong>{{ limits.xg2 }}</strong></div>
-          <div class="limit-box"><span>DVR</span><strong>{{ limits.dvr }}</strong></div>
-          <div class="limit-box"><span>ONU</span><strong>{{ limits.onu }}</strong></div>
+      <form method="post" action="{{ url_for('submit_order') }}" id="orderForm">
+        <input type="hidden" name="accepted" value="{{ accepted }}">
+        <input type="hidden" name="telegram_user_id" id="telegram_user_id">
+        <input type="hidden" name="telegram_username" id="telegram_username">
+        <input type="hidden" name="telegram_name" id="telegram_name">
+        <input type="hidden" name="raw_telegram_data" id="raw_telegram_data">
+
+        <div class="form-section">
+          <label for="bp_number">BP Number</label>
+          <input
+            id="bp_number"
+            name="bp_number"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            value="{{ form_values.bp_number }}"
+            placeholder="Enter BP Number"
+            required
+          >
         </div>
-      </div>
 
-      <form method="post" action="{{ url_for('accept') }}">
-        <button type="submit" class="primary-btn">I Accept and Continue</button>
+        <div class="form-section">
+          <div class="section-title">Equipment Quantities</div>
+          <div class="equipment-grid">
+            {% for item in [
+              ('xb3','XB3'), ('xb6','XB6'), ('xb7','XB7'), ('xb8','XB8'),
+              ('xb10','XB10'), ('xi6','XI6'), ('xid','XID'), ('xg2','XG2'),
+              ('dvr','DVR'), ('onu','ONU'), ('xer10','XER10'), ('camera','Camera'),
+              ('battery','Battery'), ('sensor','Sensor'), ('screen','Screen')
+            ] %}
+            <div class="qty-card">
+              <div class="qty-name">{{ item[1] }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn minus" data-target="{{ item[0] }}">−</button>
+                <input type="number" min="0" step="1" name="{{ item[0] }}" id="{{ item[0] }}" value="{{ form_values[item[0]] }}" class="qty-input">
+                <button type="button" class="qty-btn plus" data-target="{{ item[0] }}">+</button>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-title">Additional Equipment</div>
+          <div class="equipment-grid single-grid">
+            <div class="qty-card">
+              <div class="qty-name">Additional Qty</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn minus" data-target="extra_qty">−</button>
+                <input type="number" min="0" step="1" name="extra_qty" id="extra_qty" value="{{ form_values.extra_qty }}" class="qty-input">
+                <button type="button" class="qty-btn plus" data-target="extra_qty">+</button>
+              </div>
+            </div>
+          </div>
+
+          <label for="extra_note" class="mt-16">Additional Equipment Description</label>
+          <textarea
+            id="extra_note"
+            name="extra_note"
+            rows="3"
+            placeholder="Describe the additional equipment here"
+          >{{ form_values.extra_note }}</textarea>
+        </div>
+
+        <div class="limits-note">
+          Daily limits: Total modems {{ limits.modems_total }}, XI6 {{ limits.xi6 }}, XID {{ limits.xid }}, XG2 {{ limits.xg2 }}, DVR {{ limits.dvr }}, ONU {{ limits.onu }}.
+        </div>
+
+        <button type="submit" class="primary-btn">Submit Request</button>
       </form>
     </div>
   </div>
@@ -59,10 +108,49 @@
       tg.expand();
       try { tg.setHeaderColor("#0f172a"); } catch (e) {}
       try { tg.setBackgroundColor("#eef4ff"); } catch (e) {}
-      if (tg.disableVerticalSwipes) {
-        tg.disableVerticalSwipes();
+      if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+
+      const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+      if (user) {
+        document.getElementById("telegram_user_id").value = user.id || "";
+        document.getElementById("telegram_username").value = user.username || "";
+        document.getElementById("telegram_name").value =
+          [user.first_name || "", user.last_name || ""].join(" ").trim();
       }
+      document.getElementById("raw_telegram_data").value = tg.initData || "";
     }
+
+    function clampNonNegative(input) {
+      let value = parseInt(input.value || "0", 10);
+      if (isNaN(value) || value < 0) value = 0;
+      input.value = value;
+    }
+
+    document.querySelectorAll(".qty-btn.plus").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const target = document.getElementById(btn.dataset.target);
+        clampNonNegative(target);
+        target.value = parseInt(target.value || "0", 10) + 1;
+      });
+    });
+
+    document.querySelectorAll(".qty-btn.minus").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const target = document.getElementById(btn.dataset.target);
+        clampNonNegative(target);
+        target.value = Math.max(0, parseInt(target.value || "0", 10) - 1);
+      });
+    });
+
+    document.querySelectorAll(".qty-input").forEach(input => {
+      input.addEventListener("change", () => clampNonNegative(input));
+      input.addEventListener("blur", () => clampNonNegative(input));
+    });
+
+    const bpInput = document.getElementById("bp_number");
+    bpInput.addEventListener("keydown", function(e) {
+      if (e.key === "Enter") this.blur();
+    });
   </script>
 </body>
 </html>
