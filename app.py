@@ -445,6 +445,11 @@ def index():
     return render_template("disclaimer.html", limits=LIMITS)
 
 
+@app.route("/accept", methods=["POST"])
+def accept():
+    return redirect(url_for("request_form", accepted="1"))
+
+
 @app.route("/request")
 def request_form():
     if request.args.get("accepted") != "1":
@@ -497,4 +502,81 @@ def submit_order():
         sensor=cleaned["sensor"],
         screen=cleaned["screen"],
         extra_qty=cleaned["extra_qty"],
-        extra
+        extra_note=cleaned["extra_note"],
+    )
+
+    db.session.add(order)
+    db.session.commit()
+
+    export_note = ""
+    if in_export_window():
+        sent, status = maybe_send_export(force=False)
+        export_note = status if sent else ""
+
+    return render_template(
+        "success.html",
+        bp_number=cleaned["bp_number"],
+        confirmation_message="Your request was sent to the Warehouse.",
+        export_note=export_note,
+    )
+
+
+@app.route("/admin/orders")
+def admin_orders():
+    require_token(ADMIN_TOKEN)
+    business_date_raw = request.args.get("date")
+    if business_date_raw:
+        selected_date = date.fromisoformat(business_date_raw)
+    else:
+        selected_date = current_business_date()
+
+    orders = get_orders_for_business_date(selected_date)
+    return render_template(
+        "admin_orders.html",
+        selected_date=selected_date.isoformat(),
+        orders=orders,
+    )
+
+
+@app.route("/admin/export/check")
+def admin_export_check():
+    require_token(EXPORT_ENDPOINT_TOKEN)
+    force = request.args.get("force") == "1"
+    sent, status = maybe_send_export(force=force)
+    return jsonify(
+        {
+            "ok": True,
+            "sent": sent,
+            "status": status,
+            "business_date": current_business_date().isoformat(),
+            "now_et": et_now().isoformat(),
+        }
+    )
+
+
+@app.route("/admin/export/csv")
+def admin_export_csv():
+    require_token(ADMIN_TOKEN)
+    business_date_raw = request.args.get("date")
+    selected_date = (
+        date.fromisoformat(business_date_raw)
+        if business_date_raw
+        else current_business_date()
+    )
+    csv_content, _, _, _ = build_export_data(selected_date)
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=warehouse_orders_{selected_date.isoformat()}.csv"
+        },
+    )
+
+
+with app.app_context():
+    db.create_all()
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
