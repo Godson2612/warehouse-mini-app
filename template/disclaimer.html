@@ -2,10 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
-  >
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Warehouse Request</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -26,8 +23,7 @@
       <div class="section-card">
         <div class="section-title">Important</div>
         <div class="rules-grid">
-          <div class="rule-pill">Warehouse closes at 9:00 PM</div>
-          <div class="rule-pill">No exceptions</div>
+          <div class="rule-pill">Warehouse closes at 9:00 AM</div>
           <div class="rule-pill">Badge required to receive equipment</div>
           <div class="rule-pill">Must have badge</div>
           <div class="rule-pill">Check your buffer before pickup</div>
@@ -46,9 +42,7 @@
         </div>
       </div>
 
-      <form method="post" action="{{ url_for('accept') }}">
-        <button type="submit" class="primary-btn">I Accept and Continue</button>
-      </form>
+      <a href="{{ url_for('request_form', accepted='1') }}" class="primary-btn link-btn">I Accept and Continue</a>
     </div>
   </div>
 
@@ -59,9 +53,7 @@
       tg.expand();
       try { tg.setHeaderColor("#0f172a"); } catch (e) {}
       try { tg.setBackgroundColor("#eef4ff"); } catch (e) {}
-      if (tg.disableVerticalSwipes) {
-        tg.disableVerticalSwipes();
-      }
+      if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
     }
   </script>
 </body>
