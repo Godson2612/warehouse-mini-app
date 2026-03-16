@@ -1,68 +1,54 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover"
-  />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Admin Orders</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='21') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
-  <div class="app-shell">
-    <div class="app-scroll">
-      <div class="container">
-        <div class="card">
-          <div class="badge">Admin</div>
-          <h1 class="page-title">Orders for {{ selected_date }}</h1>
-
-          <div class="info-box">
-            <p><strong>Total orders:</strong> {{ orders|length }}</p>
-            <p>
-              <a class="inline-link" href="{{ url_for('admin_export_csv', date=selected_date, token=request.args.get('token')) }}">
-                Download CSV
-              </a>
-            </p>
-          </div>
-
-          {% if orders %}
-          <div class="admin-table-wrap">
-            <table class="admin-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Submitted ET</th>
-                  <th>BP Number</th>
-                  <th>Technician</th>
-                  <th>Breakdown</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for order in orders %}
-                <tr>
-                  <td>{{ order.id }}</td>
-                  <td>{{ order.created_at_et().strftime("%Y-%m-%d %I:%M %p") }}</td>
-                  <td>{{ order.bp_number }}</td>
-                  <td>{{ order.telegram_name or "-" }}</td>
-                  <td>
-                    XB3 {{ order.xb3 }}, XB6 {{ order.xb6 }}, XB7 {{ order.xb7 }}, XB8 {{ order.xb8 }}, XB10 {{ order.xb10 }},
-                    XI6 {{ order.xi6 }}, XID {{ order.xid }}, XG2 {{ order.xg2 }}, DVR {{ order.dvr }}, ONU {{ order.onu }},
-                    XER10 {{ order.xer10 }}, CAMERA {{ order.camera }}, BATTERY {{ order.battery }}, SENSOR {{ order.sensor }},
-                    SCREEN {{ order.screen }}, EXTRA {{ order.extra_qty }}{% if order.extra_note %} ({{ order.extra_note }}){% endif %}
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-          {% else %}
-          <div class="empty-state">
-            <p>No orders found for this business date.</p>
-          </div>
-          {% endif %}
+<body class="admin-body">
+  <div class="admin-wrap">
+    <div class="admin-card">
+      <div class="admin-top">
+        <div>
+          <h1>Orders for {{ selected_date }}</h1>
+          <p class="subtitle">Warehouse export review</p>
         </div>
+        <a class="secondary-btn" href="{{ url_for('admin_export_csv', date=selected_date, token=request.args.get('token')) }}">Download CSV</a>
       </div>
+
+      {% if orders %}
+      <div class="table-scroll">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Submitted ET</th>
+              <th>BP Number</th>
+              <th>Technician</th>
+              <th>Order Breakdown</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for order in orders %}
+            <tr>
+              <td>{{ order.created_at_et().strftime("%Y-%m-%d %I:%M %p") }}</td>
+              <td>{{ order.bp_number }}</td>
+              <td>{{ order.telegram_name or "-" }}</td>
+              <td>
+                XB3 {{ order.xb3 }}, XB6 {{ order.xb6 }}, XB7 {{ order.xb7 }}, XB8 {{ order.xb8 }},
+                XB10 {{ order.xb10 }}, XI6 {{ order.xi6 }}, XID {{ order.xid }}, XG2 {{ order.xg2 }},
+                DVR {{ order.dvr }}, ONU {{ order.onu }}, XER10 {{ order.xer10 }}, CAMERA {{ order.camera }},
+                BATTERY {{ order.battery }}, SENSOR {{ order.sensor }}, SCREEN {{ order.screen }},
+                EXTRA {{ order.extra_qty }}{% if order.extra_note %} ({{ order.extra_note }}){% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty-state">No orders found for this date.</div>
+      {% endif %}
     </div>
   </div>
 </body>
