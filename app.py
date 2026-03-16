@@ -18,7 +18,6 @@ from flask import (
     redirect,
     render_template,
     request,
-    session,
     url_for,
 )
 from flask_sqlalchemy import SQLAlchemy
@@ -179,7 +178,7 @@ def validate_order_form(form_data) -> tuple[list[str], dict]:
     for field in QTY_FIELDS:
         cleaned[field] = parse_non_negative_int(form_data.get(field))
 
-    errors = []
+    errors: list[str] = []
 
     if not cleaned["bp_number"]:
         errors.append("BP Number is required.")
@@ -194,22 +193,16 @@ def validate_order_form(form_data) -> tuple[list[str], dict]:
 
     if modems_total > LIMITS["modems_total"]:
         errors.append("Total modems cannot exceed 12.")
-
     if cleaned["xi6"] > LIMITS["xi6"]:
         errors.append("XI6 cannot exceed 12.")
-
     if cleaned["xid"] > LIMITS["xid"]:
         errors.append("XID cannot exceed 12.")
-
     if cleaned["xg2"] > LIMITS["xg2"]:
         errors.append("XG2 cannot exceed 5.")
-
     if cleaned["dvr"] > LIMITS["dvr"]:
         errors.append("DVR cannot exceed 5.")
-
     if cleaned["onu"] > LIMITS["onu"]:
         errors.append("ONU cannot exceed 2.")
-
     if cleaned["extra_qty"] > 0 and not cleaned["extra_note"]:
         errors.append("Please describe the additional equipment.")
 
@@ -449,31 +442,31 @@ def add_cache_headers(response):
 
 @app.route("/")
 def index():
-    session["accepted_rules"] = False
     return render_template("disclaimer.html", limits=LIMITS)
 
 
 @app.route("/accept", methods=["POST"])
 def accept():
-    session["accepted_rules"] = True
-    return redirect(url_for("request_form"))
+    return redirect(url_for("request_form", accepted="1"))
 
 
 @app.route("/request")
 def request_form():
-    if not session.get("accepted_rules"):
+    if request.args.get("accepted") != "1":
         return redirect(url_for("index"))
+
     return render_template(
         "request_form.html",
         limits=LIMITS,
         errors=[],
         form_values=empty_form_values(),
+        accepted="1",
     )
 
 
 @app.route("/submit", methods=["POST"])
 def submit_order():
-    if not session.get("accepted_rules"):
+    if request.form.get("accepted") != "1":
         return redirect(url_for("index"))
 
     errors, cleaned = validate_order_form(request.form)
@@ -483,6 +476,7 @@ def submit_order():
             limits=LIMITS,
             errors=errors,
             form_values=cleaned,
+            accepted="1",
         )
 
     order = Order(
