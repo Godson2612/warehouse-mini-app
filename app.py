@@ -1,582 +1,841 @@
-from __future__ import annotations
-
-import csv
-import hashlib
-import html
-import io
 import os
-import smtplib
-from datetime import date, datetime, timedelta, timezone
-from email.message import EmailMessage
+import io
+import csv
+import json
+import sqlite3
+import logging
+import threading
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
+from contextlib import closing
 
-from flask import (
-    Flask,
-    Response,
-    abort,
-    jsonify,
-    redirect,
-    render_template,
-    request,
-    url_for,
+from flask import Flask, request, jsonify, redirect, Response
+from apscheduler.schedulers.background import BackgroundScheduler
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+    InputFile,
 )
-from flask_sqlalchemy import SQLAlchemy
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
+# ============================================================
+# CONFIG
+# ============================================================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
+BASE_URL = os.getenv("BASE_URL", "https://your-domain-or-tunnel-url")
+APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
+APP_PORT = int(os.getenv("PORT", "8080"))
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
+DB_PATH = os.getenv("DB_PATH", "orders.db")
+DEFAULT_AUTO_EXPORT_HOUR = int(os.getenv("DEFAULT_AUTO_EXPORT_HOUR", "21"))
+
 TZ = ZoneInfo(APP_TIMEZONE)
-
-
-def normalize_database_url(url: str) -> str:
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg://", 1)
-    if url.startswith("postgresql://") and "+psycopg" not in url:
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
-
-
-DATABASE_URL = normalize_database_url(
-    os.getenv("DATABASE_URL", "sqlite:///warehouse_local.db")
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger("cpe_app")
 
-app = Flask(
-    __name__,
-    template_folder="template",
-    static_folder="statics",
-    static_url_path="/static",
-)
+if BOT_TOKEN.startswith("PUT_"):
+    logger.warning("BOT_TOKEN is not configured yet.")
 
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-this-secret-key")
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
+app = Flask(__name__)
+scheduler = BackgroundScheduler(timezone=APP_TIMEZONE)
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-LIMITS = {
-    "modems_total": 12,
-    "xi6": 12,
-    "xid": 12,
-    "xg2": 5,
-    "dvr": 5,
-    "onu": 2,
-}
+# ============================================================
+# DATABASE
+# ============================================================
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    created_date TEXT NOT NULL,
+    telegram_user_id INTEGER,
+    telegram_username TEXT,
+    technician_name TEXT,
+    bp_number TEXT NOT NULL,
+    xg1v4 INTEGER NOT NULL DEFAULT 0,
+    xi6 INTEGER NOT NULL DEFAULT 0,
+    xid INTEGER NOT NULL DEFAULT 0,
+    xct2 INTEGER NOT NULL DEFAULT 0,
+    ddr INTEGER NOT NULL DEFAULT 0,
+    notes TEXT DEFAULT ''
+);
 
-QTY_FIELDS = [
-    "xb3",
-    "xb6",
-    "xb7",
-    "xb8",
-    "xb10",
-    "xi6",
-    "xid",
-    "xg2",
-    "dvr",
-    "onu",
-    "xer10",
-    "camera",
-    "battery",
-    "sensor",
-    "screen",
-    "extra_qty",
-]
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 
-EXPORT_EMAIL_TO = os.getenv("EXPORT_EMAIL_TO", "lisiyluis90@gmail.com")
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-EXPORT_ENDPOINT_TOKEN = os.getenv("EXPORT_ENDPOINT_TOKEN", "")
+CREATE TABLE IF NOT EXISTS admin_users (
+    telegram_user_id INTEGER PRIMARY KEY,
+    added_at TEXT NOT NULL
+);
+"""
 
 
-class Order(db.Model):
-    __tablename__ = "orders"
-
-    id = db.Column(db.Integer, primary_key=True)
-    created_at_utc = db.Column(
-        db.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        index=True,
-    )
-    business_date = db.Column(db.Date, nullable=False, index=True)
-
-    telegram_user_id = db.Column(db.String(80), nullable=True)
-    telegram_username = db.Column(db.String(120), nullable=True)
-    telegram_name = db.Column(db.String(200), nullable=True)
-    raw_telegram_data = db.Column(db.Text, nullable=True)
-
-    bp_number = db.Column(db.String(120), nullable=False, index=True)
-
-    xb3 = db.Column(db.Integer, nullable=False, default=0)
-    xb6 = db.Column(db.Integer, nullable=False, default=0)
-    xb7 = db.Column(db.Integer, nullable=False, default=0)
-    xb8 = db.Column(db.Integer, nullable=False, default=0)
-    xb10 = db.Column(db.Integer, nullable=False, default=0)
-    xi6 = db.Column(db.Integer, nullable=False, default=0)
-    xid = db.Column(db.Integer, nullable=False, default=0)
-    xg2 = db.Column(db.Integer, nullable=False, default=0)
-    dvr = db.Column(db.Integer, nullable=False, default=0)
-    onu = db.Column(db.Integer, nullable=False, default=0)
-    xer10 = db.Column(db.Integer, nullable=False, default=0)
-    camera = db.Column(db.Integer, nullable=False, default=0)
-    battery = db.Column(db.Integer, nullable=False, default=0)
-    sensor = db.Column(db.Integer, nullable=False, default=0)
-    screen = db.Column(db.Integer, nullable=False, default=0)
-    extra_qty = db.Column(db.Integer, nullable=False, default=0)
-    extra_note = db.Column(db.String(255), nullable=False, default="")
-
-    def created_at_et(self) -> datetime:
-        dt = self.created_at_utc
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(TZ)
+def get_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-class ExportLog(db.Model):
-    __tablename__ = "export_logs"
-
-    business_date = db.Column(db.Date, primary_key=True)
-    last_hash = db.Column(db.String(64), nullable=False, default="")
-    last_sent_at_utc = db.Column(db.DateTime(timezone=True), nullable=True)
-    send_count = db.Column(db.Integer, nullable=False, default=0)
+def init_db():
+    with closing(get_db()) as conn:
+        conn.executescript(SCHEMA_SQL)
+        conn.commit()
+        ensure_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR))
 
 
-def empty_form_values() -> dict:
-    values = {field: 0 for field in QTY_FIELDS}
-    values["bp_number"] = ""
-    values["extra_note"] = ""
-    return values
+def ensure_setting(key: str, value: str):
+    with closing(get_db()) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+            (key, value),
+        )
+        conn.commit()
 
 
-def et_now() -> datetime:
-    return datetime.now(TZ)
+def set_setting(key: str, value: str):
+    with closing(get_db()) as conn:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        conn.commit()
 
 
-def current_business_date(now_et: datetime | None = None) -> date:
-    now_et = now_et or et_now()
-    if now_et.hour < 3:
-        return (now_et - timedelta(days=1)).date()
-    return now_et.date()
+def get_setting(key: str, default=None):
+    with closing(get_db()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
 
 
-def in_export_window(now_et: datetime | None = None) -> bool:
-    now_et = now_et or et_now()
-    return now_et.hour >= 21 or now_et.hour < 3
+def add_admin_user(user_id: int):
+    now = datetime.now(TZ).isoformat()
+    with closing(get_db()) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO admin_users(telegram_user_id, added_at) VALUES(?, ?)",
+            (user_id, now),
+        )
+        conn.commit()
 
 
-def parse_non_negative_int(value: str | None) -> int:
-    try:
-        return max(0, int((value or "0").strip()))
-    except (TypeError, ValueError, AttributeError):
-        return 0
+def is_admin(user_id: int) -> bool:
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT telegram_user_id FROM admin_users WHERE telegram_user_id=?",
+            (user_id,),
+        ).fetchone()
+        return row is not None
 
 
-def validate_order_form(form_data) -> tuple[list[str], dict]:
-    cleaned = empty_form_values()
-    cleaned["bp_number"] = (form_data.get("bp_number") or "").strip()
-    cleaned["extra_note"] = (form_data.get("extra_note") or "").strip()
-
-    for field in QTY_FIELDS:
-        cleaned[field] = parse_non_negative_int(form_data.get(field))
-
-    errors: list[str] = []
-
-    if not cleaned["bp_number"]:
-        errors.append("BP Number is required.")
-
-    modems_total = (
-        cleaned["xb3"]
-        + cleaned["xb6"]
-        + cleaned["xb7"]
-        + cleaned["xb8"]
-        + cleaned["xb10"]
-    )
-
-    if modems_total > LIMITS["modems_total"]:
-        errors.append("Total modems cannot exceed 12.")
-    if cleaned["xi6"] > LIMITS["xi6"]:
-        errors.append("XI6 cannot exceed 12.")
-    if cleaned["xid"] > LIMITS["xid"]:
-        errors.append("XID cannot exceed 12.")
-    if cleaned["xg2"] > LIMITS["xg2"]:
-        errors.append("XG2 cannot exceed 5.")
-    if cleaned["dvr"] > LIMITS["dvr"]:
-        errors.append("DVR cannot exceed 5.")
-    if cleaned["onu"] > LIMITS["onu"]:
-        errors.append("ONU cannot exceed 2.")
-    if cleaned["extra_qty"] > 0 and not cleaned["extra_note"]:
-        errors.append("Please describe the additional equipment.")
-
-    total_selected = sum(cleaned[field] for field in QTY_FIELDS)
-    if total_selected <= 0:
-        errors.append("Please select at least one item.")
-
-    return errors, cleaned
+def save_order(payload: dict):
+    now = datetime.now(TZ)
+    with closing(get_db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO orders (
+                created_at, created_date, telegram_user_id, telegram_username,
+                technician_name, bp_number, xg1v4, xi6, xid, xct2, ddr, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now.isoformat(),
+                now.date().isoformat(),
+                payload.get("telegram_user_id"),
+                payload.get("telegram_username", ""),
+                payload.get("technician_name", ""),
+                payload["bp_number"],
+                int(payload.get("xg1v4", 0)),
+                int(payload.get("xi6", 0)),
+                int(payload.get("xid", 0)),
+                int(payload.get("xct2", 0)),
+                int(payload.get("ddr", 0)),
+                payload.get("notes", ""),
+            ),
+        )
+        conn.commit()
 
 
-def get_orders_for_business_date(business_date: date) -> list[Order]:
-    return (
-        Order.query.filter_by(business_date=business_date)
-        .order_by(Order.created_at_utc.asc(), Order.id.asc())
-        .all()
-    )
+def fetch_orders_for_day(day_iso: str):
+    with closing(get_db()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE created_date=? ORDER BY created_at DESC",
+            (day_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
-def build_export_data(business_date: date) -> tuple[str, str, str, int]:
-    orders = get_orders_for_business_date(business_date)
+def get_daily_stats(day_iso: str):
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_orders,
+                COALESCE(SUM(xg1v4), 0) AS xg1v4,
+                COALESCE(SUM(xi6), 0) AS xi6,
+                COALESCE(SUM(xid), 0) AS xid,
+                COALESCE(SUM(xct2), 0) AS xct2,
+                COALESCE(SUM(ddr), 0) AS ddr
+            FROM orders
+            WHERE created_date=?
+            """,
+            (day_iso,),
+        ).fetchone()
 
-    headers = [
-        "Submitted ET",
-        "Order ID",
-        "BP Number",
-        "Technician Name",
-        "Telegram Username",
-        "Telegram User ID",
-        "XB3",
-        "XB6",
-        "XB7",
-        "XB8",
-        "XB10",
-        "XI6",
-        "XID",
-        "XG2",
-        "DVR",
-        "ONU",
-        "XER10",
-        "CAMERA",
-        "BATTERY",
-        "SENSOR",
-        "SCREEN",
-        "ADDITIONAL QTY",
-        "ADDITIONAL NOTE",
-    ]
+        by_tech = conn.execute(
+            """
+            SELECT
+                COALESCE(technician_name, '') AS technician_name,
+                bp_number,
+                COUNT(*) AS orders,
+                COALESCE(SUM(xg1v4), 0) AS xg1v4,
+                COALESCE(SUM(xi6), 0) AS xi6,
+                COALESCE(SUM(xid), 0) AS xid,
+                COALESCE(SUM(xct2), 0) AS xct2,
+                COALESCE(SUM(ddr), 0) AS ddr
+            FROM orders
+            WHERE created_date=?
+            GROUP BY technician_name, bp_number
+            ORDER BY technician_name, bp_number
+            """,
+            (day_iso,),
+        ).fetchall()
 
-    totals = {field: 0 for field in QTY_FIELDS}
+        return {
+            "date": day_iso,
+            "summary": dict(row) if row else {},
+            "by_technician": [dict(r) for r in by_tech],
+        }
+
+
+def build_daily_csv_bytes(day_iso: str) -> bytes:
+    orders = fetch_orders_for_day(day_iso)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(headers)
-
-    html_rows = []
-
-    for order in orders:
-        created_et = order.created_at_et().strftime("%Y-%m-%d %I:%M %p")
-        writer.writerow(
-            [
-                created_et,
-                order.id,
-                order.bp_number,
-                order.telegram_name or "",
-                order.telegram_username or "",
-                order.telegram_user_id or "",
-                order.xb3,
-                order.xb6,
-                order.xb7,
-                order.xb8,
-                order.xb10,
-                order.xi6,
-                order.xid,
-                order.xg2,
-                order.dvr,
-                order.onu,
-                order.xer10,
-                order.camera,
-                order.battery,
-                order.sensor,
-                order.screen,
-                order.extra_qty,
-                order.extra_note,
-            ]
-        )
-
-        for field in QTY_FIELDS:
-            totals[field] += int(getattr(order, field) or 0)
-
-        html_rows.append(
-            f"""
-            <tr>
-              <td style="padding:10px;border-bottom:1px solid #e7edf5;">{html.escape(created_et)}</td>
-              <td style="padding:10px;border-bottom:1px solid #e7edf5;">{html.escape(order.bp_number)}</td>
-              <td style="padding:10px;border-bottom:1px solid #e7edf5;">{html.escape(order.telegram_name or "-")}</td>
-              <td style="padding:10px;border-bottom:1px solid #e7edf5;">
-                XB3 {order.xb3}, XB6 {order.xb6}, XB7 {order.xb7}, XB8 {order.xb8}, XB10 {order.xb10},
-                XI6 {order.xi6}, XID {order.xid}, XG2 {order.xg2}, DVR {order.dvr}, ONU {order.onu},
-                XER10 {order.xer10}, CAMERA {order.camera}, BATTERY {order.battery}, SENSOR {order.sensor},
-                SCREEN {order.screen}, EXTRA {order.extra_qty}
-                {f" ({html.escape(order.extra_note)})" if order.extra_note else ""}
-              </td>
-            </tr>
-            """
-        )
-
-    csv_content = output.getvalue()
-    subject = f"Warehouse Orders Export - {business_date.isoformat()}"
-
-    summary_html = f"""
-    <html>
-      <body style="font-family:Arial,Helvetica,sans-serif;background:#f5f7fb;color:#122033;padding:24px;">
-        <div style="max-width:980px;margin:0 auto;background:#ffffff;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(18,32,51,0.08);">
-          <h2 style="margin:0 0 8px;">Warehouse Orders Export</h2>
-          <p style="margin:0 0 18px;color:#556579;">Business date: <strong>{business_date.isoformat()}</strong></p>
-
-          <div style="background:#f7faff;border:1px solid #dfe8f5;border-radius:14px;padding:14px 16px;margin-bottom:18px;">
-            <p style="margin:0 0 10px;"><strong>Total orders:</strong> {len(orders)}</p>
-            <p style="margin:0;line-height:1.7;">
-              <strong>Modems:</strong> {totals['xb3'] + totals['xb6'] + totals['xb7'] + totals['xb8'] + totals['xb10']}<br>
-              <strong>XI6:</strong> {totals['xi6']} |
-              <strong>XID:</strong> {totals['xid']} |
-              <strong>XG2:</strong> {totals['xg2']} |
-              <strong>DVR:</strong> {totals['dvr']} |
-              <strong>ONU:</strong> {totals['onu']}<br>
-              <strong>XER10:</strong> {totals['xer10']} |
-              <strong>CAMERA:</strong> {totals['camera']} |
-              <strong>BATTERY:</strong> {totals['battery']} |
-              <strong>SENSOR:</strong> {totals['sensor']} |
-              <strong>SCREEN:</strong> {totals['screen']} |
-              <strong>ADDITIONAL:</strong> {totals['extra_qty']}
-            </p>
-          </div>
-
-          <table style="width:100%;border-collapse:collapse;font-size:14px;">
-            <thead>
-              <tr>
-                <th align="left" style="padding:10px;border-bottom:2px solid #d7e2f0;">Submitted ET</th>
-                <th align="left" style="padding:10px;border-bottom:2px solid #d7e2f0;">BP Number</th>
-                <th align="left" style="padding:10px;border-bottom:2px solid #d7e2f0;">Technician</th>
-                <th align="left" style="padding:10px;border-bottom:2px solid #d7e2f0;">Order Breakdown</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(html_rows) if html_rows else '<tr><td colspan="4" style="padding:10px;">No orders found.</td></tr>'}
-            </tbody>
-          </table>
-
-          <p style="margin-top:18px;color:#6b7b8f;">A CSV attachment with the full breakdown is included.</p>
-        </div>
-      </body>
-    </html>
-    """
-
-    return csv_content, subject, summary_html, len(orders)
+    writer.writerow([
+        "created_at",
+        "telegram_user_id",
+        "telegram_username",
+        "technician_name",
+        "bp_number",
+        "xg1v4",
+        "xi6",
+        "xid",
+        "xct2",
+        "ddr",
+        "notes",
+    ])
+    for row in orders:
+        writer.writerow([
+            row["created_at"],
+            row["telegram_user_id"],
+            row["telegram_username"],
+            row["technician_name"],
+            row["bp_number"],
+            row["xg1v4"],
+            row["xi6"],
+            row["xid"],
+            row["xct2"],
+            row["ddr"],
+            row["notes"],
+        ])
+    return output.getvalue().encode("utf-8-sig")
 
 
-def send_export_email(subject: str, html_body: str, filename: str, csv_content: str) -> tuple[bool, str]:
-    if not SMTP_USERNAME or not SMTP_PASSWORD:
-        return False, "SMTP credentials are missing."
+def stats_to_text(day_iso: str) -> str:
+    stats = get_daily_stats(day_iso)
+    s = stats["summary"]
+    lines = [
+        f"📊 Daily Stats - {day_iso}",
+        f"Total orders: {s.get('total_orders', 0)}",
+        f"XG1v4: {s.get('xg1v4', 0)}",
+        f"XI6: {s.get('xi6', 0)}",
+        f"XID: {s.get('xid', 0)}",
+        f"XCT2: {s.get('xct2', 0)}",
+        f"DDR: {s.get('ddr', 0)}",
+        "",
+        "By technician:",
+    ]
+    if not stats["by_technician"]:
+        lines.append("- No orders for this date.")
+    else:
+        for row in stats["by_technician"]:
+            tech = row["technician_name"] or "Unknown"
+            lines.append(
+                f"- {tech} | BP {row['bp_number']} | Orders {row['orders']} | "
+                f"XG1v4 {row['xg1v4']} | XI6 {row['xi6']} | XID {row['xid']} | "
+                f"XCT2 {row['xct2']} | DDR {row['ddr']}"
+            )
+    return "\n".join(lines)
 
-    message = EmailMessage()
-    message["From"] = SMTP_USERNAME
-    message["To"] = EXPORT_EMAIL_TO
-    message["Subject"] = subject
-    message.set_content(
-        "Warehouse export attached. Open this email in HTML to view the formatted summary."
-    )
-    message.add_alternative(html_body, subtype="html")
-    message.add_attachment(
-        csv_content.encode("utf-8"),
-        maintype="text",
-        subtype="csv",
-        filename=filename,
+
+# ============================================================
+# TELEGRAM BOT
+# ============================================================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="Open Order App",
+                web_app=WebAppInfo(url=f"{BASE_URL}/webapp?uid={user.id}&name={user.full_name}&username={user.username or ''}"),
+            )
+        ]
+    ]
+    await update.message.reply_text(
+        "Open the app to submit warehouse requests.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized. You are not an admin.")
+        return
+
+    hour = get_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR))
+    msg = (
+        "🔐 Admin Panel\n\n"
+        "Commands:\n"
+        "/stats - show today's stats\n"
+        "/export - export today's CSV here in Telegram\n"
+        "/exportdate YYYY-MM-DD - export any date\n"
+        "/sethour HH - set automatic daily export hour (0-23)\n"
+        f"\nCurrent automatic export hour: {hour}:00 ({APP_TIMEZONE})"
+    )
+    await update.message.reply_text(msg)
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+    today = datetime.now(TZ).date().isoformat()
+    await update.message.reply_text(stats_to_text(today))
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+    today = datetime.now(TZ).date().isoformat()
+    await send_daily_export_to_chat(context, update.effective_chat.id, today)
+
+
+async def export_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Use: /exportdate YYYY-MM-DD")
+        return
+    day_iso = context.args[0]
     try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
-            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-            smtp.send_message(message)
-        return True, "Export email sent."
-    except Exception as exc:
-        return False, f"Email send failed: {exc}"
+        datetime.strptime(day_iso, "%Y-%m-%d")
+    except ValueError:
+        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD")
+        return
+    await send_daily_export_to_chat(context, update.effective_chat.id, day_iso)
 
 
-def maybe_send_export(force: bool = False) -> tuple[bool, str]:
-    now_local = et_now()
+async def set_hour_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("Unauthorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("Use: /sethour HH")
+        return
+    try:
+        hour = int(context.args[0])
+        if hour < 0 or hour > 23:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Hour must be a number from 0 to 23.")
+        return
 
-    if not force and not in_export_window(now_local):
-        return False, "Outside export window."
-
-    business_date = current_business_date(now_local)
-    csv_content, subject, html_body, order_count = build_export_data(business_date)
-
-    if order_count == 0:
-        return False, "No orders to export."
-
-    payload_hash = hashlib.sha256(csv_content.encode("utf-8")).hexdigest()
-    log = db.session.get(ExportLog, business_date)
-
-    if log and log.last_hash == payload_hash and not force:
-        return False, "No changes since the last export."
-
-    ok, message = send_export_email(
-        subject=subject,
-        html_body=html_body,
-        filename=f"warehouse_orders_{business_date.isoformat()}.csv",
-        csv_content=csv_content,
-    )
-    if not ok:
-        return False, message
-
-    if not log:
-        log = ExportLog(business_date=business_date)
-        db.session.add(log)
-
-    log.last_hash = payload_hash
-    log.last_sent_at_utc = datetime.now(timezone.utc)
-    log.send_count = int(log.send_count or 0) + 1
-    db.session.commit()
-
-    return True, f"{message} {order_count} orders included."
-
-
-def require_token(expected_token: str) -> None:
-    provided = request.args.get("token") or request.headers.get("X-Admin-Token", "")
-    if not expected_token or provided != expected_token:
-        abort(403)
-
-
-@app.after_request
-def add_cache_headers(response):
-    if request.path.startswith("/static/"):
-        response.headers["Cache-Control"] = "public, max-age=300"
-    else:
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return response
-
-
-@app.route("/")
-def index():
-    return render_template("disclaimer.html", limits=LIMITS)
-
-
-@app.route("/accept", methods=["POST"])
-def accept():
-    return redirect(url_for("request_form", accepted="1"))
-
-
-@app.route("/request")
-def request_form():
-    if request.args.get("accepted") != "1":
-        return redirect(url_for("index"))
-
-    return render_template(
-        "request_form.html",
-        limits=LIMITS,
-        errors=[],
-        form_values=empty_form_values(),
-        accepted="1",
+    set_setting("auto_export_hour", str(hour))
+    reschedule_auto_export(hour)
+    await update.message.reply_text(
+        f"✅ Automatic daily export set to {hour:02d}:00 ({APP_TIMEZONE})."
     )
 
 
-@app.route("/submit", methods=["POST"])
-def submit_order():
-    if request.form.get("accepted") != "1":
-        return redirect(url_for("index"))
+async def grant_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Use: /grantadmin YOUR_ADMIN_TOKEN")
+        return
 
-    errors, cleaned = validate_order_form(request.form)
-    if errors:
-        return render_template(
-            "request_form.html",
-            limits=LIMITS,
-            errors=errors,
-            form_values=cleaned,
-            accepted="1",
-        )
+    supplied = context.args[0]
+    if supplied != ADMIN_TOKEN:
+        await update.message.reply_text("Invalid admin token.")
+        return
 
-    order = Order(
-        business_date=current_business_date(),
-        telegram_user_id=(request.form.get("telegram_user_id") or "").strip(),
-        telegram_username=(request.form.get("telegram_username") or "").strip(),
-        telegram_name=(request.form.get("telegram_name") or "").strip(),
-        raw_telegram_data=(request.form.get("raw_telegram_data") or "").strip(),
-        bp_number=cleaned["bp_number"],
-        xb3=cleaned["xb3"],
-        xb6=cleaned["xb6"],
-        xb7=cleaned["xb7"],
-        xb8=cleaned["xb8"],
-        xb10=cleaned["xb10"],
-        xi6=cleaned["xi6"],
-        xid=cleaned["xid"],
-        xg2=cleaned["xg2"],
-        dvr=cleaned["dvr"],
-        onu=cleaned["onu"],
-        xer10=cleaned["xer10"],
-        camera=cleaned["camera"],
-        battery=cleaned["battery"],
-        sensor=cleaned["sensor"],
-        screen=cleaned["screen"],
-        extra_qty=cleaned["extra_qty"],
-        extra_note=cleaned["extra_note"],
+    user = update.effective_user
+    add_admin_user(user.id)
+    await update.message.reply_text("✅ Admin access granted to your Telegram account.")
+
+
+async def send_daily_export_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, day_iso: str):
+    csv_bytes = build_daily_csv_bytes(day_iso)
+    caption = stats_to_text(day_iso)
+    input_file = InputFile(io.BytesIO(csv_bytes), filename=f"orders_{day_iso}.csv")
+    await context.bot.send_document(chat_id=chat_id, document=input_file, caption=caption[:1024])
+
+
+async def auto_export_job(context: ContextTypes.DEFAULT_TYPE):
+    today = datetime.now(TZ).date().isoformat()
+    with closing(get_db()) as conn:
+        admins = conn.execute("SELECT telegram_user_id FROM admin_users").fetchall()
+
+    if not admins:
+        logger.info("No admin users registered. Skipping auto export.")
+        return
+
+    for row in admins:
+        try:
+            await send_daily_export_to_chat(context, row["telegram_user_id"], today)
+        except Exception as exc:
+            logger.exception("Failed sending auto export to admin %s: %s", row["telegram_user_id"], exc)
+
+
+def reschedule_auto_export(hour: int):
+    if scheduler.get_job("daily_export"):
+        scheduler.remove_job("daily_export")
+
+    scheduler.add_job(
+        func=lambda: telegram_app.create_task(auto_export_job(telegram_app.bot)),
+        trigger="cron",
+        id="daily_export",
+        hour=hour,
+        minute=0,
+        replace_existing=True,
     )
-
-    db.session.add(order)
-    db.session.commit()
-
-    export_note = ""
-    if in_export_window():
-        sent, status = maybe_send_export(force=False)
-        export_note = status if sent else ""
-
-    return render_template(
-        "success.html",
-        bp_number=cleaned["bp_number"],
-        confirmation_message="Your request was sent to the Warehouse.",
-        export_note=export_note,
-    )
+    logger.info("Auto export scheduled at %02d:00 %s", hour, APP_TIMEZONE)
 
 
-@app.route("/admin/orders")
-def admin_orders():
-    require_token(ADMIN_TOKEN)
-    business_date_raw = request.args.get("date")
-    if business_date_raw:
-        selected_date = date.fromisoformat(business_date_raw)
-    else:
-        selected_date = current_business_date()
+# ============================================================
+# WEB APP UI
+# ============================================================
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <title>Warehouse Request</title>
+  <script src=\"https://telegram.org/js/telegram-web-app.js\"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --muted: #94a3b8;
+      --text: #f8fafc;
+      --line: #1f2937;
+      --accent: #2563eb;
+      --accent2: #1d4ed8;
+      --ok: #16a34a;
+      --danger: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: linear-gradient(180deg, #0b1220, #111827);
+      color: var(--text);
+      padding: 18px;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    .card {
+      background: rgba(17,24,39,.98);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 8px;
+    }
+    p.small { color: var(--muted); margin-top: 0; }
+    .field { margin-bottom: 14px; }
+    label {
+      display: block;
+      margin-bottom: 7px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid #334155;
+      background: #0b1220;
+      color: #fff;
+      font-size: 16px;
+      outline: none;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    .qty-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      margin-bottom: 10px;
+      background: #0b1220;
+    }
+    .qty-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .qty-btn {
+      border: none;
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      font-size: 24px;
+      color: white;
+      background: var(--accent);
+      cursor: pointer;
+    }
+    .qty-btn:active { background: var(--accent2); }
+    .qty-value {
+      min-width: 28px;
+      text-align: center;
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .submit-btn {
+      width: 100%;
+      padding: 15px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .status {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 12px;
+      display: none;
+      font-weight: 700;
+    }
+    .ok { background: rgba(22,163,74,.16); border: 1px solid rgba(22,163,74,.45); color: #bbf7d0; }
+    .err { background: rgba(220,38,38,.16); border: 1px solid rgba(220,38,38,.45); color: #fecaca; }
 
-    orders = get_orders_for_business_date(selected_date)
-    return render_template(
-        "admin_orders.html",
-        selected_date=selected_date.isoformat(),
-        orders=orders,
-    )
+    .modal-bg {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      padding: 20px;
+    }
+    .modal {
+      width: 100%;
+      max-width: 520px;
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0,0,0,.45);
+    }
+    .modal h2 { margin-top: 0; }
+    .modal p { color: #dbeafe; line-height: 1.5; }
+    .modal button {
+      width: 100%;
+      margin-top: 12px;
+      padding: 14px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      color: white;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id=\"disclaimerModal\" class=\"modal-bg\">
+    <div class=\"modal\">
+      <h2>Important Notice</h2>
+      <p>
+        This tool is for authorized internal warehouse requests only. Verify all quantities before submitting.
+        By continuing, you confirm the order information is accurate and business-related.
+      </p>
+      <button onclick=\"acceptDisclaimer()\">Accept and Continue</button>
+    </div>
+  </div>
+
+  <div class=\"wrap\">
+    <div class=\"card\">
+      <h1>Warehouse Request</h1>
+      <p class=\"small\">Professional internal order entry</p>
+
+      <div class=\"field\">
+        <label for=\"techName\">Technician Name</label>
+        <input id=\"techName\" placeholder=\"Enter technician name\" />
+      </div>
+
+      <div class=\"field\">
+        <label for=\"bpNumber\">BP Number</label>
+        <input id=\"bpNumber\" inputmode=\"numeric\" placeholder=\"Enter BP number\" />
+      </div>
+
+      <div id=\"qtyList\"></div>
+
+      <div class=\"field\">
+        <label for=\"notes\">Notes (optional)</label>
+        <textarea id=\"notes\" placeholder=\"Extra details if needed\"></textarea>
+      </div>
+
+      <button class=\"submit-btn\" onclick=\"submitOrder()\">Submit Order</button>
+      <div id=\"status\" class=\"status\"></div>
+    </div>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    const items = [
+      { key: 'xg1v4', label: 'XG1v4' },
+      { key: 'xi6', label: 'XI6' },
+      { key: 'xid', label: 'XID' },
+      { key: 'xct2', label: 'XCT2' },
+      { key: 'ddr', label: 'DDR' },
+    ];
+
+    const counts = {
+      xg1v4: 0,
+      xi6: 0,
+      xid: 0,
+      xct2: 0,
+      ddr: 0,
+    };
+
+    const qtyList = document.getElementById('qtyList');
+    items.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'qty-row';
+      row.innerHTML = `
+        <div><strong>${item.label}</strong></div>
+        <div class=\"qty-controls\">
+          <button type=\"button\" class=\"qty-btn\" onclick=\"changeQty('${item.key}', -1)\">−</button>
+          <div id=\"val_${item.key}\" class=\"qty-value\">0</div>
+          <button type=\"button\" class=\"qty-btn\" onclick=\"changeQty('${item.key}', 1)\">+</button>
+        </div>
+      `;
+      qtyList.appendChild(row);
+    });
+
+    function acceptDisclaimer() {
+      localStorage.setItem('warehouse_disclaimer_ok', '1');
+      document.getElementById('disclaimerModal').classList.add('hidden');
+    }
+
+    if (localStorage.getItem('warehouse_disclaimer_ok') === '1') {
+      document.getElementById('disclaimerModal').classList.add('hidden');
+    }
+
+    function changeQty(key, delta) {
+      counts[key] = Math.max(0, (counts[key] || 0) + delta);
+      document.getElementById(`val_${key}`).textContent = counts[key];
+    }
+
+    function showStatus(message, type) {
+      const el = document.getElementById('status');
+      el.textContent = message;
+      el.className = `status ${type}`;
+      el.style.display = 'block';
+    }
+
+    const bpInput = document.getElementById('bpNumber');
+    bpInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        bpInput.blur();
+        document.activeElement?.blur?.();
+      }
+    });
+
+    async function submitOrder() {
+      const techName = document.getElementById('techName').value.trim();
+      const bpNumber = document.getElementById('bpNumber').value.trim();
+      const notes = document.getElementById('notes').value.trim();
+
+      if (!bpNumber) {
+        showStatus('BP Number is required.', 'err');
+        return;
+      }
+
+      const payload = {
+        technician_name: techName,
+        bp_number: bpNumber,
+        notes,
+        ...counts,
+      };
+
+      if (tg?.initDataUnsafe?.user) {
+        payload.telegram_user_id = tg.initDataUnsafe.user.id;
+        payload.telegram_username = tg.initDataUnsafe.user.username || '';
+      }
+
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to submit order.');
+
+        showStatus('Order submitted successfully. Your request was sent to the Warehouse.', 'ok');
+        document.getElementById('notes').value = '';
+        items.forEach(item => {
+          counts[item.key] = 0;
+          document.getElementById(`val_${item.key}`).textContent = '0';
+        });
+      } catch (err) {
+        showStatus(err.message || 'Unexpected error.', 'err');
+      }
+    }
+  </script>
+</body>
+</html>
+"""
 
 
-@app.route("/admin/export/check")
-def admin_export_check():
-    require_token(EXPORT_ENDPOINT_TOKEN)
-    force = request.args.get("force") == "1"
-    sent, status = maybe_send_export(force=force)
-    return jsonify(
-        {
-            "ok": True,
-            "sent": sent,
-            "status": status,
-            "business_date": current_business_date().isoformat(),
-            "now_et": et_now().isoformat(),
-        }
-    )
+@app.get("/")
+def root():
+    return redirect("/webapp")
 
 
-@app.route("/admin/export/csv")
-def admin_export_csv():
-    require_token(ADMIN_TOKEN)
-    business_date_raw = request.args.get("date")
-    selected_date = (
-        date.fromisoformat(business_date_raw)
-        if business_date_raw
-        else current_business_date()
-    )
-    csv_content, _, _, _ = build_export_data(selected_date)
+@app.get("/webapp")
+def webapp_page():
+    return Response(HTML_PAGE, mimetype="text/html")
+
+
+@app.post("/api/orders")
+def create_order():
+    data = request.get_json(silent=True) or {}
+    bp_number = str(data.get("bp_number", "")).strip()
+    if not bp_number:
+        return jsonify({"error": "BP Number is required."}), 400
+
+    payload = {
+        "telegram_user_id": data.get("telegram_user_id"),
+        "telegram_username": data.get("telegram_username", ""),
+        "technician_name": str(data.get("technician_name", "")).strip(),
+        "bp_number": bp_number,
+        "xg1v4": int(data.get("xg1v4", 0) or 0),
+        "xi6": int(data.get("xi6", 0) or 0),
+        "xid": int(data.get("xid", 0) or 0),
+        "xct2": int(data.get("xct2", 0) or 0),
+        "ddr": int(data.get("ddr", 0) or 0),
+        "notes": str(data.get("notes", "")).strip(),
+    }
+
+    save_order(payload)
+    return jsonify({"ok": True, "message": "Order submitted successfully."})
+
+
+@app.get("/admin/stats")
+def admin_stats_api():
+    token = request.args.get("token", "")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+    day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
+    return jsonify(get_daily_stats(day_iso))
+
+
+@app.get("/admin/export")
+def admin_export_api():
+    token = request.args.get("token", "")
+    if token != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+    day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
+    csv_bytes = build_daily_csv_bytes(day_iso)
     return Response(
-        csv_content,
+        csv_bytes,
         mimetype="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=warehouse_orders_{selected_date.isoformat()}.csv"
-        },
+        headers={"Content-Disposition": f"attachment; filename=orders_{day_iso}.csv"},
     )
 
 
-with app.app_context():
-    db.create_all()
+# ============================================================
+# APP STARTUP
+# ============================================================
+def setup_scheduler():
+    hour = int(get_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR)))
+    if not scheduler.running:
+        scheduler.start()
+    reschedule_auto_export(hour)
+
+
+def register_handlers():
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("admin", admin_command))
+    telegram_app.add_handler(CommandHandler("stats", stats_command))
+    telegram_app.add_handler(CommandHandler("export", export_command))
+    telegram_app.add_handler(CommandHandler("exportdate", export_date_command))
+    telegram_app.add_handler(CommandHandler("sethour", set_hour_command))
+    telegram_app.add_handler(CommandHandler("grantadmin", grant_admin_command))
+
+
+def run_bot():
+    register_handlers()
+    telegram_app.run_polling(close_loop=False)
+
+
+def run_web():
+    app.run(host=APP_HOST, port=APP_PORT, debug=False, use_reloader=False)
+
+
+def main():
+    init_db()
+    setup_scheduler()
+
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    logger.info("Web app starting on %s:%s", APP_HOST, APP_PORT)
+    logger.info("BASE_URL=%s", BASE_URL)
+    run_web()
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    main()
