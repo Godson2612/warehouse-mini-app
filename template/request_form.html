@@ -1,156 +1,368 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>New Warehouse Order</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warehouse Request</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --muted: #94a3b8;
+      --text: #f8fafc;
+      --line: #1f2937;
+      --accent: #2563eb;
+      --accent2: #1d4ed8;
+      --ok: #16a34a;
+      --danger: #dc2626;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: linear-gradient(180deg, #0b1220, #111827);
+      color: var(--text);
+      padding: 18px;
+    }
+
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: rgba(17, 24, 39, .98);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .25);
+    }
+
+    h1 {
+      font-size: 22px;
+      margin: 0 0 8px;
+    }
+
+    p.small {
+      color: var(--muted);
+      margin-top: 0;
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 7px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    input, textarea {
+      width: 100%;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid #334155;
+      background: #0b1220;
+      color: #fff;
+      font-size: 16px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+
+    .qty-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      margin-bottom: 10px;
+      background: #0b1220;
+    }
+
+    .qty-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .qty-btn {
+      border: none;
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      font-size: 24px;
+      color: white;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    .qty-btn:active {
+      background: var(--accent2);
+    }
+
+    .qty-value {
+      min-width: 28px;
+      text-align: center;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 15px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+
+    .status {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 12px;
+      display: none;
+      font-weight: 700;
+    }
+
+    .ok {
+      background: rgba(22, 163, 74, .16);
+      border: 1px solid rgba(22, 163, 74, .45);
+      color: #bbf7d0;
+    }
+
+    .err {
+      background: rgba(220, 38, 38, .16);
+      border: 1px solid rgba(220, 38, 38, .45);
+      color: #fecaca;
+    }
+
+    .modal-bg {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      padding: 20px;
+    }
+
+    .modal {
+      width: 100%;
+      max-width: 520px;
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+    }
+
+    .modal h2 {
+      margin-top: 0;
+    }
+
+    .modal p {
+      color: #dbeafe;
+      line-height: 1.5;
+    }
+
+    .modal button {
+      width: 100%;
+      margin-top: 12px;
+      padding: 14px;
+      border: none;
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      color: white;
+      font-weight: 700;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
 </head>
 <body>
-  <div class="page-shell">
-    <div class="glass-bg"></div>
+  <div id="disclaimerModal" class="modal-bg">
+    <div class="modal">
+      <h2>Important Notice</h2>
+      <p>
+        Internal warehouse requests only. Please verify all quantities before submitting.
+      </p>
+      <button type="button" onclick="acceptDisclaimer()">Accept and Continue</button>
+    </div>
+  </div>
 
-    <div class="main-card">
-      <div class="brand-row">
-        <div class="brand-badge">BP</div>
-        <div>
-          <h1>New Warehouse Order</h1>
-          <p class="subtitle">Complete the request below and submit it to the warehouse.</p>
-        </div>
+  <div class="wrap">
+    <div class="card">
+      <h1>Warehouse Request</h1>
+      <p class="small">Professional internal order entry</p>
+
+      <div class="field">
+        <label for="techName">Technician Name</label>
+        <input id="techName" placeholder="Enter technician name" />
       </div>
 
-      {% if errors %}
-      <div class="error-card">
-        {% for error in errors %}
-        <div class="error-line">{{ error }}</div>
-        {% endfor %}
+      <div class="field">
+        <label for="bpNumber">BP Number</label>
+        <input id="bpNumber" inputmode="numeric" placeholder="Enter BP number" />
       </div>
-      {% endif %}
 
-      <form method="post" action="{{ url_for('submit_order') }}" id="orderForm">
-        <input type="hidden" name="accepted" value="{{ accepted }}">
-        <input type="hidden" name="telegram_user_id" id="telegram_user_id">
-        <input type="hidden" name="telegram_username" id="telegram_username">
-        <input type="hidden" name="telegram_name" id="telegram_name">
-        <input type="hidden" name="raw_telegram_data" id="raw_telegram_data">
+      <div id="qtyList"></div>
 
-        <div class="form-section">
-          <label for="bp_number">BP Number</label>
-          <input
-            id="bp_number"
-            name="bp_number"
-            type="text"
-            inputmode="text"
-            autocomplete="off"
-            value="{{ form_values.bp_number }}"
-            placeholder="Enter BP Number"
-            required
-          >
-        </div>
+      <div class="field">
+        <label for="notes">Notes (optional)</label>
+        <textarea id="notes" placeholder="Extra details if needed"></textarea>
+      </div>
 
-        <div class="form-section">
-          <div class="section-title">Equipment Quantities</div>
-          <div class="equipment-grid">
-            {% for item in [
-              ('xb3','XB3'), ('xb6','XB6'), ('xb7','XB7'), ('xb8','XB8'),
-              ('xb10','XB10'), ('xi6','XI6'), ('xid','XID'), ('xg2','XG2'),
-              ('dvr','DVR'), ('onu','ONU'), ('xer10','XER10'), ('camera','Camera'),
-              ('battery','Battery'), ('sensor','Sensor'), ('screen','Screen')
-            ] %}
-            <div class="qty-card">
-              <div class="qty-name">{{ item[1] }}</div>
-              <div class="qty-controls">
-                <button type="button" class="qty-btn minus" data-target="{{ item[0] }}">−</button>
-                <input type="number" min="0" step="1" name="{{ item[0] }}" id="{{ item[0] }}" value="{{ form_values[item[0]] }}" class="qty-input">
-                <button type="button" class="qty-btn plus" data-target="{{ item[0] }}">+</button>
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-
-        <div class="form-section">
-          <div class="section-title">Additional Equipment</div>
-          <div class="equipment-grid single-grid">
-            <div class="qty-card">
-              <div class="qty-name">Additional Qty</div>
-              <div class="qty-controls">
-                <button type="button" class="qty-btn minus" data-target="extra_qty">−</button>
-                <input type="number" min="0" step="1" name="extra_qty" id="extra_qty" value="{{ form_values.extra_qty }}" class="qty-input">
-                <button type="button" class="qty-btn plus" data-target="extra_qty">+</button>
-              </div>
-            </div>
-          </div>
-
-          <label for="extra_note" class="mt-16">Additional Equipment Description</label>
-          <textarea
-            id="extra_note"
-            name="extra_note"
-            rows="3"
-            placeholder="Describe the additional equipment here"
-          >{{ form_values.extra_note }}</textarea>
-        </div>
-
-        <div class="limits-note">
-          Daily limits: Total modems {{ limits.modems_total }}, XI6 {{ limits.xi6 }}, XID {{ limits.xid }}, XG2 {{ limits.xg2 }}, DVR {{ limits.dvr }}, ONU {{ limits.onu }}.
-        </div>
-
-        <button type="submit" class="primary-btn">Submit Request</button>
-      </form>
+      <button class="submit-btn" type="button" onclick="submitOrder()">Submit Order</button>
+      <div id="status" class="status"></div>
     </div>
   </div>
 
   <script>
-    if (window.Telegram && window.Telegram.WebApp) {
-      const tg = window.Telegram.WebApp;
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
       tg.ready();
       tg.expand();
-      try { tg.setHeaderColor("#0f172a"); } catch (e) {}
-      try { tg.setBackgroundColor("#eef4ff"); } catch (e) {}
-      if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    }
 
-      const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
-      if (user) {
-        document.getElementById("telegram_user_id").value = user.id || "";
-        document.getElementById("telegram_username").value = user.username || "";
-        document.getElementById("telegram_name").value =
-          [user.first_name || "", user.last_name || ""].join(" ").trim();
+    const items = [
+      { key: 'xg1v4', label: 'XG1v4' },
+      { key: 'xi6', label: 'XI6' },
+      { key: 'xid', label: 'XID' },
+      { key: 'xct2', label: 'XCT2' },
+      { key: 'ddr', label: 'DDR' }
+    ];
+
+    const counts = {
+      xg1v4: 0,
+      xi6: 0,
+      xid: 0,
+      xct2: 0,
+      ddr: 0
+    };
+
+    const qtyList = document.getElementById('qtyList');
+
+    items.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'qty-row';
+      row.innerHTML = `
+        <div><strong>${item.label}</strong></div>
+        <div class="qty-controls">
+          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', -1)">−</button>
+          <div id="val_${item.key}" class="qty-value">0</div>
+          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', 1)">+</button>
+        </div>
+      `;
+      qtyList.appendChild(row);
+    });
+
+    function acceptDisclaimer() {
+      localStorage.setItem('warehouse_disclaimer_ok', '1');
+      document.getElementById('disclaimerModal').classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
+    if (localStorage.getItem('warehouse_disclaimer_ok') === '1') {
+      document.getElementById('disclaimerModal').classList.add('hidden');
+    } else {
+      document.body.style.overflow = 'hidden';
+    }
+
+    function changeQty(key, delta) {
+      counts[key] = Math.max(0, (counts[key] || 0) + delta);
+      document.getElementById(`val_${key}`).textContent = counts[key];
+    }
+
+    function showStatus(message, type) {
+      const el = document.getElementById('status');
+      el.textContent = message;
+      el.className = `status ${type}`;
+      el.style.display = 'block';
+    }
+
+    const bpInput = document.getElementById('bpNumber');
+    bpInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.blur();
+        if (document.activeElement) {
+          document.activeElement.blur();
+        }
       }
-      document.getElementById("raw_telegram_data").value = tg.initData || "";
+    });
+
+    async function submitOrder() {
+      if (localStorage.getItem('warehouse_disclaimer_ok') !== '1') {
+        showStatus('Please accept the notice before continuing.', 'err');
+        return;
+      }
+
+      const techName = document.getElementById('techName').value.trim();
+      const bpNumber = document.getElementById('bpNumber').value.trim();
+      const notes = document.getElementById('notes').value.trim();
+
+      if (!bpNumber) {
+        showStatus('BP Number is required.', 'err');
+        return;
+      }
+
+      const payload = {
+        technician_name: techName,
+        bp_number: bpNumber,
+        notes,
+        ...counts
+      };
+
+      if (tg?.initDataUnsafe?.user) {
+        payload.telegram_user_id = tg.initDataUnsafe.user.id;
+        payload.telegram_username = tg.initDataUnsafe.user.username || '';
+      }
+
+      try {
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to submit order.');
+        }
+
+        showStatus('Order submitted successfully. Your request was sent to the Warehouse.', 'ok');
+
+        document.getElementById('notes').value = '';
+
+        items.forEach(item => {
+          counts[item.key] = 0;
+          document.getElementById(`val_${item.key}`).textContent = '0';
+        });
+      } catch (err) {
+        showStatus(err.message || 'Unexpected error.', 'err');
+      }
     }
-
-    function clampNonNegative(input) {
-      let value = parseInt(input.value || "0", 10);
-      if (isNaN(value) || value < 0) value = 0;
-      input.value = value;
-    }
-
-    document.querySelectorAll(".qty-btn.plus").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const target = document.getElementById(btn.dataset.target);
-        clampNonNegative(target);
-        target.value = parseInt(target.value || "0", 10) + 1;
-      });
-    });
-
-    document.querySelectorAll(".qty-btn.minus").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const target = document.getElementById(btn.dataset.target);
-        clampNonNegative(target);
-        target.value = Math.max(0, parseInt(target.value || "0", 10) - 1);
-      });
-    });
-
-    document.querySelectorAll(".qty-input").forEach(input => {
-      input.addEventListener("change", () => clampNonNegative(input));
-      input.addEventListener("blur", () => clampNonNegative(input));
-    });
-
-    const bpInput = document.getElementById("bp_number");
-    bpInput.addEventListener("keydown", function(e) {
-      if (e.key === "Enter") this.blur();
-    });
   </script>
 </body>
 </html>
