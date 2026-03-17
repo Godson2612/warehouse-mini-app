@@ -1,11 +1,10 @@
 import os
 import io
 import csv
-import json
-import sqlite3
 import logging
+import sqlite3
 import threading
-from datetime import datetime, date
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import closing
 
@@ -27,28 +26,31 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY")
-BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com").rstrip("/")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 DEFAULT_AUTO_EXPORT_HOUR = int(os.getenv("DEFAULT_AUTO_EXPORT_HOUR", "21"))
 
 TZ = ZoneInfo(APP_TIMEZONE)
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("cpe_app")
-
-if BOT_TOKEN.startswith("PUT_"):
-    logger.warning("BOT_TOKEN is not configured yet.")
+logger = logging.getLogger("warehouse_app")
 
 app = Flask(__name__)
 scheduler = BackgroundScheduler(timezone=APP_TIMEZONE)
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+telegram_app = None
+if BOT_TOKEN:
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
+else:
+    logger.warning("BOT_TOKEN is not configured. Telegram bot features will be disabled.")
 
 # ============================================================
 # DATABASE
@@ -285,14 +287,14 @@ def stats_to_text(day_iso: str) -> str:
 # ============================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text="Open Order App",
-                web_app=WebAppInfo(url=f"{BASE_URL}/webapp?uid={user.id}&name={user.full_name}&username={user.username or ''}"),
-            )
-        ]
-    ]
+    keyboard = [[
+        InlineKeyboardButton(
+            text="Open Order App",
+            web_app=WebAppInfo(
+                url=f"{BASE_URL}/webapp?uid={user.id}&name={user.full_name}&username={user.username or ''}"
+            ),
+        )
+    ]]
     await update.message.reply_text(
         "Open the app to submit warehouse requests.",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -344,12 +346,14 @@ async def export_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not context.args:
         await update.message.reply_text("Use: /exportdate YYYY-MM-DD")
         return
+
     day_iso = context.args[0]
     try:
         datetime.strptime(day_iso, "%Y-%m-%d")
     except ValueError:
         await update.message.reply_text("Invalid date format. Use YYYY-MM-DD")
         return
+
     await send_daily_export_to_chat(context, update.effective_chat.id, day_iso)
 
 
@@ -395,10 +399,17 @@ async def send_daily_export_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id:
     csv_bytes = build_daily_csv_bytes(day_iso)
     caption = stats_to_text(day_iso)
     input_file = InputFile(io.BytesIO(csv_bytes), filename=f"orders_{day_iso}.csv")
-    await context.bot.send_document(chat_id=chat_id, document=input_file, caption=caption[:1024])
+    await context.bot.send_document(
+        chat_id=chat_id,
+        document=input_file,
+        caption=caption[:1024],
+    )
 
 
-async def auto_export_job(context: ContextTypes.DEFAULT_TYPE):
+async def auto_export_job():
+    if telegram_app is None:
+        return
+
     today = datetime.now(TZ).date().isoformat()
     with closing(get_db()) as conn:
         admins = conn.execute("SELECT telegram_user_id FROM admin_users").fetchall()
@@ -409,9 +420,30 @@ async def auto_export_job(context: ContextTypes.DEFAULT_TYPE):
 
     for row in admins:
         try:
-            await send_daily_export_to_chat(context, row["telegram_user_id"], today)
+            csv_bytes = build_daily_csv_bytes(today)
+            caption = stats_to_text(today)
+            input_file = InputFile(io.BytesIO(csv_bytes), filename=f"orders_{today}.csv")
+            await telegram_app.bot.send_document(
+                chat_id=row["telegram_user_id"],
+                document=input_file,
+                caption=caption[:1024],
+            )
         except Exception as exc:
-            logger.exception("Failed sending auto export to admin %s: %s", row["telegram_user_id"], exc)
+            logger.exception(
+                "Failed sending auto export to admin %s: %s",
+                row["telegram_user_id"],
+                exc,
+            )
+
+
+def run_auto_export_job():
+    if telegram_app is None:
+        return
+    try:
+        import asyncio
+        asyncio.run(auto_export_job())
+    except Exception as exc:
+        logger.exception("Auto export job failed: %s", exc)
 
 
 def reschedule_auto_export(hour: int):
@@ -419,7 +451,7 @@ def reschedule_auto_export(hour: int):
         scheduler.remove_job("daily_export")
 
     scheduler.add_job(
-        func=lambda: telegram_app.create_task(auto_export_job(telegram_app.bot)),
+        func=run_auto_export_job,
         trigger="cron",
         id="daily_export",
         hour=hour,
@@ -429,17 +461,37 @@ def reschedule_auto_export(hour: int):
     logger.info("Auto export scheduled at %02d:00 %s", hour, APP_TIMEZONE)
 
 
+def register_handlers():
+    if telegram_app is None:
+        return
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("admin", admin_command))
+    telegram_app.add_handler(CommandHandler("stats", stats_command))
+    telegram_app.add_handler(CommandHandler("export", export_command))
+    telegram_app.add_handler(CommandHandler("exportdate", export_date_command))
+    telegram_app.add_handler(CommandHandler("sethour", set_hour_command))
+    telegram_app.add_handler(CommandHandler("grantadmin", grant_admin_command))
+
+
+def run_bot():
+    if telegram_app is None:
+        logger.info("Telegram bot not started because BOT_TOKEN is missing.")
+        return
+    register_handlers()
+    telegram_app.run_polling(close_loop=False)
+
+
 # ============================================================
 # WEB APP UI
 # ============================================================
 HTML_PAGE = """
 <!DOCTYPE html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"UTF-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Warehouse Request</title>
-  <script src=\"https://telegram.org/js/telegram-web-app.js\"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
       --bg: #0f172a;
@@ -452,7 +504,9 @@ HTML_PAGE = """
       --ok: #16a34a;
       --danger: #dc2626;
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       font-family: Arial, sans-serif;
@@ -460,10 +514,12 @@ HTML_PAGE = """
       color: var(--text);
       padding: 18px;
     }
+
     .wrap {
       max-width: 720px;
       margin: 0 auto;
     }
+
     .card {
       background: rgba(17,24,39,.98);
       border: 1px solid var(--line);
@@ -471,18 +527,28 @@ HTML_PAGE = """
       padding: 18px;
       box-shadow: 0 10px 30px rgba(0,0,0,.25);
     }
+
     h1 {
       font-size: 22px;
       margin: 0 0 8px;
     }
-    p.small { color: var(--muted); margin-top: 0; }
-    .field { margin-bottom: 14px; }
+
+    p.small {
+      color: var(--muted);
+      margin-top: 0;
+    }
+
+    .field {
+      margin-bottom: 14px;
+    }
+
     label {
       display: block;
       margin-bottom: 7px;
       font-weight: 700;
       font-size: 14px;
     }
+
     input, textarea {
       width: 100%;
       padding: 14px;
@@ -493,7 +559,12 @@ HTML_PAGE = """
       font-size: 16px;
       outline: none;
     }
-    textarea { min-height: 88px; resize: vertical; }
+
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+
     .qty-row {
       display: grid;
       grid-template-columns: 1fr auto;
@@ -505,11 +576,13 @@ HTML_PAGE = """
       margin-bottom: 10px;
       background: #0b1220;
     }
+
     .qty-controls {
       display: flex;
       align-items: center;
       gap: 10px;
     }
+
     .qty-btn {
       border: none;
       width: 42px;
@@ -520,13 +593,18 @@ HTML_PAGE = """
       background: var(--accent);
       cursor: pointer;
     }
-    .qty-btn:active { background: var(--accent2); }
+
+    .qty-btn:active {
+      background: var(--accent2);
+    }
+
     .qty-value {
       min-width: 28px;
       text-align: center;
       font-size: 20px;
       font-weight: 700;
     }
+
     .submit-btn {
       width: 100%;
       padding: 15px;
@@ -539,6 +617,7 @@ HTML_PAGE = """
       cursor: pointer;
       margin-top: 8px;
     }
+
     .status {
       margin-top: 14px;
       padding: 12px;
@@ -546,8 +625,18 @@ HTML_PAGE = """
       display: none;
       font-weight: 700;
     }
-    .ok { background: rgba(22,163,74,.16); border: 1px solid rgba(22,163,74,.45); color: #bbf7d0; }
-    .err { background: rgba(220,38,38,.16); border: 1px solid rgba(220,38,38,.45); color: #fecaca; }
+
+    .ok {
+      background: rgba(22,163,74,.16);
+      border: 1px solid rgba(22,163,74,.45);
+      color: #bbf7d0;
+    }
+
+    .err {
+      background: rgba(220,38,38,.16);
+      border: 1px solid rgba(220,38,38,.45);
+      color: #fecaca;
+    }
 
     .modal-bg {
       position: fixed;
@@ -559,6 +648,7 @@ HTML_PAGE = """
       z-index: 9999;
       padding: 20px;
     }
+
     .modal {
       width: 100%;
       max-width: 520px;
@@ -568,8 +658,16 @@ HTML_PAGE = """
       padding: 20px;
       box-shadow: 0 20px 50px rgba(0,0,0,.45);
     }
-    .modal h2 { margin-top: 0; }
-    .modal p { color: #dbeafe; line-height: 1.5; }
+
+    .modal h2 {
+      margin-top: 0;
+    }
+
+    .modal p {
+      color: #dbeafe;
+      line-height: 1.5;
+    }
+
     .modal button {
       width: 100%;
       margin-top: 12px;
@@ -582,45 +680,47 @@ HTML_PAGE = """
       font-size: 16px;
       cursor: pointer;
     }
-    .hidden { display: none !important; }
+
+    .hidden {
+      display: none !important;
+    }
   </style>
 </head>
 <body>
-  <div id=\"disclaimerModal\" class=\"modal-bg\">
-    <div class=\"modal\">
+  <div id="disclaimerModal" class="modal-bg">
+    <div class="modal">
       <h2>Important Notice</h2>
       <p>
-        This tool is for authorized internal warehouse requests only. Verify all quantities before submitting.
-        By continuing, you confirm the order information is accurate and business-related.
+        Internal warehouse requests only. Please verify all quantities before submitting.
       </p>
-      <button onclick=\"acceptDisclaimer()\">Accept and Continue</button>
+      <button type="button" onclick="acceptDisclaimer()">Accept and Continue</button>
     </div>
   </div>
 
-  <div class=\"wrap\">
-    <div class=\"card\">
+  <div class="wrap">
+    <div class="card">
       <h1>Warehouse Request</h1>
-      <p class=\"small\">Professional internal order entry</p>
+      <p class="small">Professional internal order entry</p>
 
-      <div class=\"field\">
-        <label for=\"techName\">Technician Name</label>
-        <input id=\"techName\" placeholder=\"Enter technician name\" />
+      <div class="field">
+        <label for="techName">Technician Name</label>
+        <input id="techName" placeholder="Enter technician name" />
       </div>
 
-      <div class=\"field\">
-        <label for=\"bpNumber\">BP Number</label>
-        <input id=\"bpNumber\" inputmode=\"numeric\" placeholder=\"Enter BP number\" />
+      <div class="field">
+        <label for="bpNumber">BP Number</label>
+        <input id="bpNumber" inputmode="numeric" placeholder="Enter BP number" />
       </div>
 
-      <div id=\"qtyList\"></div>
+      <div id="qtyList"></div>
 
-      <div class=\"field\">
-        <label for=\"notes\">Notes (optional)</label>
-        <textarea id=\"notes\" placeholder=\"Extra details if needed\"></textarea>
+      <div class="field">
+        <label for="notes">Notes (optional)</label>
+        <textarea id="notes" placeholder="Extra details if needed"></textarea>
       </div>
 
-      <button class=\"submit-btn\" onclick=\"submitOrder()\">Submit Order</button>
-      <div id=\"status\" class=\"status\"></div>
+      <button class="submit-btn" type="button" onclick="submitOrder()">Submit Order</button>
+      <div id="status" class="status"></div>
     </div>
   </div>
 
@@ -636,7 +736,7 @@ HTML_PAGE = """
       { key: 'xi6', label: 'XI6' },
       { key: 'xid', label: 'XID' },
       { key: 'xct2', label: 'XCT2' },
-      { key: 'ddr', label: 'DDR' },
+      { key: 'ddr', label: 'DDR' }
     ];
 
     const counts = {
@@ -644,19 +744,20 @@ HTML_PAGE = """
       xi6: 0,
       xid: 0,
       xct2: 0,
-      ddr: 0,
+      ddr: 0
     };
 
     const qtyList = document.getElementById('qtyList');
+
     items.forEach(item => {
       const row = document.createElement('div');
       row.className = 'qty-row';
       row.innerHTML = `
         <div><strong>${item.label}</strong></div>
-        <div class=\"qty-controls\">
-          <button type=\"button\" class=\"qty-btn\" onclick=\"changeQty('${item.key}', -1)\">−</button>
-          <div id=\"val_${item.key}\" class=\"qty-value\">0</div>
-          <button type=\"button\" class=\"qty-btn\" onclick=\"changeQty('${item.key}', 1)\">+</button>
+        <div class="qty-controls">
+          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', -1)">−</button>
+          <div id="val_${item.key}" class="qty-value">0</div>
+          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', 1)">+</button>
         </div>
       `;
       qtyList.appendChild(row);
@@ -665,10 +766,13 @@ HTML_PAGE = """
     function acceptDisclaimer() {
       localStorage.setItem('warehouse_disclaimer_ok', '1');
       document.getElementById('disclaimerModal').classList.add('hidden');
+      document.body.style.overflow = '';
     }
 
     if (localStorage.getItem('warehouse_disclaimer_ok') === '1') {
       document.getElementById('disclaimerModal').classList.add('hidden');
+    } else {
+      document.body.style.overflow = 'hidden';
     }
 
     function changeQty(key, delta) {
@@ -687,12 +791,19 @@ HTML_PAGE = """
     bpInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
         e.preventDefault();
-        bpInput.blur();
-        document.activeElement?.blur?.();
+        this.blur();
+        if (document.activeElement) {
+          document.activeElement.blur();
+        }
       }
     });
 
     async function submitOrder() {
+      if (localStorage.getItem('warehouse_disclaimer_ok') !== '1') {
+        showStatus('Please accept the notice before continuing.', 'err');
+        return;
+      }
+
       const techName = document.getElementById('techName').value.trim();
       const bpNumber = document.getElementById('bpNumber').value.trim();
       const notes = document.getElementById('notes').value.trim();
@@ -706,7 +817,7 @@ HTML_PAGE = """
         technician_name: techName,
         bp_number: bpNumber,
         notes,
-        ...counts,
+        ...counts
       };
 
       if (tg?.initDataUnsafe?.user) {
@@ -718,13 +829,19 @@ HTML_PAGE = """
         const res = await fetch('/api/orders', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(payload)
         });
+
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to submit order.');
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to submit order.');
+        }
 
         showStatus('Order submitted successfully. Your request was sent to the Warehouse.', 'ok');
+
         document.getElementById('notes').value = '';
+
         items.forEach(item => {
           counts[item.key] = 0;
           document.getElementById(`val_${item.key}`).textContent = '0';
@@ -741,18 +858,23 @@ HTML_PAGE = """
 
 @app.get("/")
 def root():
+    ensure_app_started()
     return redirect("/webapp")
 
 
 @app.get("/webapp")
 def webapp_page():
+    ensure_app_started()
     return Response(HTML_PAGE, mimetype="text/html")
 
 
 @app.post("/api/orders")
 def create_order():
+    ensure_app_started()
+
     data = request.get_json(silent=True) or {}
     bp_number = str(data.get("bp_number", "")).strip()
+
     if not bp_number:
         return jsonify({"error": "BP Number is required."}), 400
 
@@ -775,20 +897,27 @@ def create_order():
 
 @app.get("/admin/stats")
 def admin_stats_api():
+    ensure_app_started()
+
     token = request.args.get("token", "")
     if token != ADMIN_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
+
     day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
     return jsonify(get_daily_stats(day_iso))
 
 
 @app.get("/admin/export")
 def admin_export_api():
+    ensure_app_started()
+
     token = request.args.get("token", "")
     if token != ADMIN_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
+
     day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
     csv_bytes = build_daily_csv_bytes(day_iso)
+
     return Response(
         csv_bytes,
         mimetype="text/csv",
@@ -799,6 +928,10 @@ def admin_export_api():
 # ============================================================
 # APP STARTUP
 # ============================================================
+_started = False
+_start_lock = threading.Lock()
+
+
 def setup_scheduler():
     hour = int(get_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR)))
     if not scheduler.running:
@@ -806,36 +939,36 @@ def setup_scheduler():
     reschedule_auto_export(hour)
 
 
-def register_handlers():
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("admin", admin_command))
-    telegram_app.add_handler(CommandHandler("stats", stats_command))
-    telegram_app.add_handler(CommandHandler("export", export_command))
-    telegram_app.add_handler(CommandHandler("exportdate", export_date_command))
-    telegram_app.add_handler(CommandHandler("sethour", set_hour_command))
-    telegram_app.add_handler(CommandHandler("grantadmin", grant_admin_command))
+def start_background_services():
+    if telegram_app is not None:
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        logger.info("Telegram bot thread started.")
+    else:
+        logger.info("Telegram bot disabled.")
 
-
-def run_bot():
-    register_handlers()
-    telegram_app.run_polling(close_loop=False)
-
-
-def run_web():
-    app.run(host=APP_HOST, port=APP_PORT, debug=False, use_reloader=False)
-
-
-def main():
-    init_db()
     setup_scheduler()
+    logger.info("Scheduler started.")
 
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
 
-    logger.info("Web app starting on %s:%s", APP_HOST, APP_PORT)
-    logger.info("BASE_URL=%s", BASE_URL)
-    run_web()
+def ensure_app_started():
+    global _started
+    if _started:
+        return
 
+    with _start_lock:
+        if _started:
+            return
+
+        init_db()
+        start_background_services()
+        _started = True
+        logger.info("Application startup completed.")
+
+
+ensure_app_started()
 
 if __name__ == "__main__":
-    main()
+    logger.info("Web app starting on %s:%s", APP_HOST, APP_PORT)
+    logger.info("BASE_URL=%s", BASE_URL)
+    app.run(host=APP_HOST, port=APP_PORT, debug=False, use_reloader=False)
