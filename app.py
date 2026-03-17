@@ -8,7 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import closing
 
-from flask import Flask, request, jsonify, redirect, Response
+from flask import Flask, request, jsonify, redirect, Response, render_template
 from apscheduler.schedulers.background import BackgroundScheduler
 from telegram import (
     Update,
@@ -26,11 +26,11 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY", "")
 BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com").rstrip("/")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 DEFAULT_AUTO_EXPORT_HOUR = int(os.getenv("DEFAULT_AUTO_EXPORT_HOUR", "21"))
@@ -343,6 +343,7 @@ async def export_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not is_admin(user.id):
         await update.message.reply_text("Unauthorized.")
         return
+
     if not context.args:
         await update.message.reply_text("Use: /exportdate YYYY-MM-DD")
         return
@@ -362,9 +363,11 @@ async def set_hour_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         await update.message.reply_text("Unauthorized.")
         return
+
     if not context.args:
         await update.message.reply_text("Use: /sethour HH")
         return
+
     try:
         hour = int(context.args[0])
         if hour < 0 or hour > 23:
@@ -482,380 +485,8 @@ def run_bot():
 
 
 # ============================================================
-# WEB APP UI
+# WEB ROUTES
 # ============================================================
-HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Warehouse Request</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    :root {
-      --bg: #0f172a;
-      --card: #111827;
-      --muted: #94a3b8;
-      --text: #f8fafc;
-      --line: #1f2937;
-      --accent: #2563eb;
-      --accent2: #1d4ed8;
-      --ok: #16a34a;
-      --danger: #dc2626;
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      font-family: Arial, sans-serif;
-      background: linear-gradient(180deg, #0b1220, #111827);
-      color: var(--text);
-      padding: 18px;
-    }
-
-    .wrap {
-      max-width: 720px;
-      margin: 0 auto;
-    }
-
-    .card {
-      background: rgba(17,24,39,.98);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 18px;
-      box-shadow: 0 10px 30px rgba(0,0,0,.25);
-    }
-
-    h1 {
-      font-size: 22px;
-      margin: 0 0 8px;
-    }
-
-    p.small {
-      color: var(--muted);
-      margin-top: 0;
-    }
-
-    .field {
-      margin-bottom: 14px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 7px;
-      font-weight: 700;
-      font-size: 14px;
-    }
-
-    input, textarea {
-      width: 100%;
-      padding: 14px;
-      border-radius: 12px;
-      border: 1px solid #334155;
-      background: #0b1220;
-      color: #fff;
-      font-size: 16px;
-      outline: none;
-    }
-
-    textarea {
-      min-height: 88px;
-      resize: vertical;
-    }
-
-    .qty-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 12px;
-      align-items: center;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      margin-bottom: 10px;
-      background: #0b1220;
-    }
-
-    .qty-controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .qty-btn {
-      border: none;
-      width: 42px;
-      height: 42px;
-      border-radius: 12px;
-      font-size: 24px;
-      color: white;
-      background: var(--accent);
-      cursor: pointer;
-    }
-
-    .qty-btn:active {
-      background: var(--accent2);
-    }
-
-    .qty-value {
-      min-width: 28px;
-      text-align: center;
-      font-size: 20px;
-      font-weight: 700;
-    }
-
-    .submit-btn {
-      width: 100%;
-      padding: 15px;
-      border: none;
-      border-radius: 14px;
-      background: linear-gradient(90deg, var(--accent), var(--accent2));
-      color: #fff;
-      font-size: 17px;
-      font-weight: 700;
-      cursor: pointer;
-      margin-top: 8px;
-    }
-
-    .status {
-      margin-top: 14px;
-      padding: 12px;
-      border-radius: 12px;
-      display: none;
-      font-weight: 700;
-    }
-
-    .ok {
-      background: rgba(22,163,74,.16);
-      border: 1px solid rgba(22,163,74,.45);
-      color: #bbf7d0;
-    }
-
-    .err {
-      background: rgba(220,38,38,.16);
-      border: 1px solid rgba(220,38,38,.45);
-      color: #fecaca;
-    }
-
-    .modal-bg {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,.7);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 9999;
-      padding: 20px;
-    }
-
-    .modal {
-      width: 100%;
-      max-width: 520px;
-      background: #111827;
-      border: 1px solid #334155;
-      border-radius: 20px;
-      padding: 20px;
-      box-shadow: 0 20px 50px rgba(0,0,0,.45);
-    }
-
-    .modal h2 {
-      margin-top: 0;
-    }
-
-    .modal p {
-      color: #dbeafe;
-      line-height: 1.5;
-    }
-
-    .modal button {
-      width: 100%;
-      margin-top: 12px;
-      padding: 14px;
-      border: none;
-      border-radius: 14px;
-      background: linear-gradient(90deg, var(--accent), var(--accent2));
-      color: white;
-      font-weight: 700;
-      font-size: 16px;
-      cursor: pointer;
-    }
-
-    .hidden {
-      display: none !important;
-    }
-  </style>
-</head>
-<body>
-  <div id="disclaimerModal" class="modal-bg">
-    <div class="modal">
-      <h2>Important Notice</h2>
-      <p>
-        Internal warehouse requests only. Please verify all quantities before submitting.
-      </p>
-      <button type="button" onclick="acceptDisclaimer()">Accept and Continue</button>
-    </div>
-  </div>
-
-  <div class="wrap">
-    <div class="card">
-      <h1>Warehouse Request</h1>
-      <p class="small">Professional internal order entry</p>
-
-      <div class="field">
-        <label for="techName">Technician Name</label>
-        <input id="techName" placeholder="Enter technician name" />
-      </div>
-
-      <div class="field">
-        <label for="bpNumber">BP Number</label>
-        <input id="bpNumber" inputmode="numeric" placeholder="Enter BP number" />
-      </div>
-
-      <div id="qtyList"></div>
-
-      <div class="field">
-        <label for="notes">Notes (optional)</label>
-        <textarea id="notes" placeholder="Extra details if needed"></textarea>
-      </div>
-
-      <button class="submit-btn" type="button" onclick="submitOrder()">Submit Order</button>
-      <div id="status" class="status"></div>
-    </div>
-  </div>
-
-  <script>
-    const tg = window.Telegram?.WebApp;
-    if (tg) {
-      tg.ready();
-      tg.expand();
-    }
-
-    const items = [
-      { key: 'xg1v4', label: 'XG1v4' },
-      { key: 'xi6', label: 'XI6' },
-      { key: 'xid', label: 'XID' },
-      { key: 'xct2', label: 'XCT2' },
-      { key: 'ddr', label: 'DDR' }
-    ];
-
-    const counts = {
-      xg1v4: 0,
-      xi6: 0,
-      xid: 0,
-      xct2: 0,
-      ddr: 0
-    };
-
-    const qtyList = document.getElementById('qtyList');
-
-    items.forEach(item => {
-      const row = document.createElement('div');
-      row.className = 'qty-row';
-      row.innerHTML = `
-        <div><strong>${item.label}</strong></div>
-        <div class="qty-controls">
-          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', -1)">−</button>
-          <div id="val_${item.key}" class="qty-value">0</div>
-          <button type="button" class="qty-btn" onclick="changeQty('${item.key}', 1)">+</button>
-        </div>
-      `;
-      qtyList.appendChild(row);
-    });
-
-    function acceptDisclaimer() {
-      localStorage.setItem('warehouse_disclaimer_ok', '1');
-      document.getElementById('disclaimerModal').classList.add('hidden');
-      document.body.style.overflow = '';
-    }
-
-    if (localStorage.getItem('warehouse_disclaimer_ok') === '1') {
-      document.getElementById('disclaimerModal').classList.add('hidden');
-    } else {
-      document.body.style.overflow = 'hidden';
-    }
-
-    function changeQty(key, delta) {
-      counts[key] = Math.max(0, (counts[key] || 0) + delta);
-      document.getElementById(`val_${key}`).textContent = counts[key];
-    }
-
-    function showStatus(message, type) {
-      const el = document.getElementById('status');
-      el.textContent = message;
-      el.className = `status ${type}`;
-      el.style.display = 'block';
-    }
-
-    const bpInput = document.getElementById('bpNumber');
-    bpInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        this.blur();
-        if (document.activeElement) {
-          document.activeElement.blur();
-        }
-      }
-    });
-
-    async function submitOrder() {
-      if (localStorage.getItem('warehouse_disclaimer_ok') !== '1') {
-        showStatus('Please accept the notice before continuing.', 'err');
-        return;
-      }
-
-      const techName = document.getElementById('techName').value.trim();
-      const bpNumber = document.getElementById('bpNumber').value.trim();
-      const notes = document.getElementById('notes').value.trim();
-
-      if (!bpNumber) {
-        showStatus('BP Number is required.', 'err');
-        return;
-      }
-
-      const payload = {
-        technician_name: techName,
-        bp_number: bpNumber,
-        notes,
-        ...counts
-      };
-
-      if (tg?.initDataUnsafe?.user) {
-        payload.telegram_user_id = tg.initDataUnsafe.user.id;
-        payload.telegram_username = tg.initDataUnsafe.user.username || '';
-      }
-
-      try {
-        const res = await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to submit order.');
-        }
-
-        showStatus('Order submitted successfully. Your request was sent to the Warehouse.', 'ok');
-
-        document.getElementById('notes').value = '';
-
-        items.forEach(item => {
-          counts[item.key] = 0;
-          document.getElementById(`val_${item.key}`).textContent = '0';
-        });
-      } catch (err) {
-        showStatus(err.message || 'Unexpected error.', 'err');
-      }
-    }
-  </script>
-</body>
-</html>
-"""
-
-
 @app.get("/")
 def root():
     ensure_app_started()
@@ -865,7 +496,7 @@ def root():
 @app.get("/webapp")
 def webapp_page():
     ensure_app_started()
-    return Response(HTML_PAGE, mimetype="text/html")
+    return render_template("request_form.html")
 
 
 @app.post("/api/orders")
