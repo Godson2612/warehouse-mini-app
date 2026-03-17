@@ -27,7 +27,7 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY")
 BASE_URL = os.getenv("BASE_URL", "https://your-domain-or-tunnel-url")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
