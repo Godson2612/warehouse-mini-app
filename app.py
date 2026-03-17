@@ -28,10 +28,10 @@ from telegram.ext import (
 # CONFIG
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY")
-BASE_URL = os.getenv("BASE_URL", "https://your-domain-or-tunnel-url")
+BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 DEFAULT_AUTO_EXPORT_HOUR = int(os.getenv("DEFAULT_AUTO_EXPORT_HOUR", "21"))
