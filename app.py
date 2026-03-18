@@ -1,7 +1,6 @@
 import os
 import io
 import csv
-import json
 import sqlite3
 import logging
 import threading
@@ -111,6 +110,7 @@ DEFAULT_SETTINGS = {
     "limit_camera": "50",
     "limit_extra_item": "10",
     "technician_message": "",
+    "technician_message_active_until": "",
 }
 
 
@@ -190,6 +190,35 @@ def parse_int(value, default=0):
         return max(0, int(str(value).strip() or default))
     except Exception:
         return default
+
+
+def get_end_of_today_iso() -> str:
+    now = datetime.now(TZ)
+    end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    return end_of_day.isoformat()
+
+
+def get_active_technician_message() -> str:
+    message = get_setting("technician_message", "").strip()
+    active_until = get_setting("technician_message_active_until", "").strip()
+
+    if not message or not active_until:
+        return ""
+
+    try:
+        expires_at = datetime.fromisoformat(active_until)
+    except Exception:
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return ""
+
+    now = datetime.now(TZ)
+    if now > expires_at:
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return ""
+
+    return message
 
 
 def save_order(payload: dict):
@@ -437,7 +466,7 @@ def health():
 @app.get("/webapp")
 def webapp_page():
     limits = get_limits()
-    technician_message = get_setting("technician_message", "")
+    technician_message = get_active_technician_message()
     popup_message = (
         "Badge is required to pick up equipment. "
         "The warehouse closes at 9:00 AM. "
@@ -496,7 +525,7 @@ def create_order():
     error = validate_payload(payload)
     if error:
         limits = get_limits()
-        technician_message = get_setting("technician_message", "")
+        technician_message = get_active_technician_message()
         popup_message = (
             "Badge is required to pick up equipment. "
             "The warehouse closes at 9:00 AM. "

@@ -98,6 +98,40 @@ def set_setting(key: str, value: str):
         conn.commit()
 
 
+def get_active_message_info():
+    message = get_setting("technician_message", "").strip()
+    active_until = get_setting("technician_message_active_until", "").strip()
+
+    if not message or not active_until:
+        return "", ""
+
+    try:
+        expires_at = datetime.fromisoformat(active_until)
+    except Exception:
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return "", ""
+
+    now = datetime.now(TZ)
+    if now > expires_at:
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return "", ""
+
+    return message, active_until
+
+
+def set_technician_message(message: str):
+    active_until = datetime.now(TZ).replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+    set_setting("technician_message", message)
+    set_setting("technician_message_active_until", active_until)
+
+
+def clear_technician_message():
+    set_setting("technician_message", "")
+    set_setting("technician_message_active_until", "")
+
+
 def fetch_recent_orders(limit=20):
     with closing(get_db()) as conn:
         rows = conn.execute(
@@ -157,7 +191,7 @@ def weekly_stats_text():
     top_techs = sorted(tech_visits.items(), key=lambda x: x[1], reverse=True)
 
     lines = [
-        f"📊 Weekly Statistics",
+        "📊 Weekly Statistics",
         f"Range: {start_date} to {datetime.now(TZ).date().isoformat()}",
         "",
         "Most requested equipment:",
@@ -296,14 +330,31 @@ def build_excel_summary(day_iso: str) -> bytes:
 # UI
 # ============================================================
 def main_menu():
+    message, active_until = get_active_message_info()
+    msg_status = "Active" if message else "Inactive"
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("View Orders", callback_data="view_orders")],
         [InlineKeyboardButton("Export Orders", callback_data="export_orders")],
         [InlineKeyboardButton("View Statistics", callback_data="view_stats")],
-        [InlineKeyboardButton("Message for Technicians", callback_data="message_techs")],
+        [InlineKeyboardButton(f"Message for Technicians ({msg_status})", callback_data="message_menu")],
         [InlineKeyboardButton("Set Max Equipment", callback_data="set_limits")],
         [InlineKeyboardButton("Refresh", callback_data="refresh_menu")],
     ])
+
+
+def message_menu():
+    message, active_until = get_active_message_info()
+
+    rows = []
+    if message:
+        rows.append([InlineKeyboardButton("Edit Message", callback_data="edit_message")])
+        rows.append([InlineKeyboardButton("Delete Message", callback_data="delete_message")])
+    else:
+        rows.append([InlineKeyboardButton("Create Message", callback_data="create_message")])
+
+    rows.append([InlineKeyboardButton("Back", callback_data="back_main")])
+    return InlineKeyboardMarkup(rows)
 
 
 def limits_menu():
@@ -321,6 +372,19 @@ def limits_menu():
         rows.append(current_row)
     rows.append([InlineKeyboardButton("Back", callback_data="back_main")])
     return InlineKeyboardMarkup(rows)
+
+
+def message_status_text():
+    message, active_until = get_active_message_info()
+    if not message:
+        return "No active technician message."
+
+    expires = datetime.fromisoformat(active_until).astimezone(TZ)
+    return (
+        "Current technician message:\n\n"
+        f"{message}\n\n"
+        f"Active until: {expires.strftime('%Y-%m-%d %I:%M:%S %p')}"
+    )
 
 
 # ============================================================
@@ -385,11 +449,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Export sent.", reply_markup=main_menu())
         return
 
-    if data == "message_techs":
-        context.user_data["awaiting"] = "technician_message"
+    if data == "message_menu":
         await query.edit_message_text(
-            "Send the message for technicians now.\nIt will appear after the first Accept popup.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_main")]])
+            message_status_text(),
+            reply_markup=message_menu(),
+        )
+        return
+
+    if data == "create_message":
+        context.user_data["awaiting"] = "technician_message_create"
+        await query.edit_message_text(
+            "Send the new message for technicians now.\nIt will expire automatically today at 11:59 PM.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
+        )
+        return
+
+    if data == "edit_message":
+        context.user_data["awaiting"] = "technician_message_edit"
+        await query.edit_message_text(
+            "Send the updated message for technicians now.\nIt will expire automatically today at 11:59 PM.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
+        )
+        return
+
+    if data == "delete_message":
+        clear_technician_message()
+        context.user_data.pop("awaiting", None)
+        await query.edit_message_text(
+            "Technician message deleted.",
+            reply_markup=main_menu(),
         )
         return
 
@@ -423,10 +511,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip()
 
-    if awaiting == "technician_message":
-        set_setting("technician_message", text)
+    if awaiting in ("technician_message_create", "technician_message_edit"):
+        set_technician_message(text)
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text("Technician message updated.", reply_markup=main_menu())
+        _, active_until = get_active_message_info()
+        expires = datetime.fromisoformat(active_until).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
+        await update.message.reply_text(
+            f"Technician message saved.\nActive until: {expires}",
+            reply_markup=main_menu(),
+        )
         return
 
     if awaiting.startswith("limit::"):
