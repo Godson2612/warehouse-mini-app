@@ -492,7 +492,11 @@ def run_tech_bot():
         asyncio.set_event_loop(loop)
         register_tech_handlers()
         logger.info("Tech bot started.")
-        tech_bot_app.run_polling(close_loop=False, drop_pending_updates=True)
+        tech_bot_app.run_polling(
+            close_loop=False,
+            drop_pending_updates=True,
+            stop_signals=None,
+        )
     except Exception as exc:
         logger.exception("Tech bot failed: %s", exc)
 
@@ -1009,7 +1013,11 @@ def run_admin_bot():
         asyncio.set_event_loop(loop)
         register_admin_handlers()
         logger.info("Admin bot started.")
-        admin_bot_app.run_polling(close_loop=False, drop_pending_updates=True)
+        admin_bot_app.run_polling(
+            close_loop=False,
+            drop_pending_updates=True,
+            stop_signals=None,
+        )
     except Exception as exc:
         logger.exception("Admin bot failed: %s", exc)
 
