@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
-<body>
+<body data-success-message="{{ confirmation_message }}">
   <div class="page-shell">
     <div class="glass-bg"></div>
 
@@ -26,28 +26,10 @@
         </div>
       </div>
 
-      {% if export_note %}
-      <div class="section-card">
-        <div class="section-title">Export Status</div>
-        <p class="status-text">{{ export_note }}</p>
-      </div>
-      {% endif %}
-
-      <a href="{{ url_for('index') }}" class="primary-btn link-btn">Submit Another Request</a>
+      <a href="{{ url_for('webapp_page') }}" class="primary-btn link-btn">Submit Another Request</a>
     </div>
   </div>
 
-  <script>
-    if (window.Telegram && window.Telegram.WebApp) {
-      const tg = window.Telegram.WebApp;
-      tg.ready();
-      tg.expand();
-      try { tg.setHeaderColor("#0f172a"); } catch (e) {}
-      try { tg.setBackgroundColor("#eef4ff"); } catch (e) {}
-      if (tg.disableVerticalSwipes) {
-        tg.disableVerticalSwipes();
-      }
-    }
-  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

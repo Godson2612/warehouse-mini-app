@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  >
+  <title>Warehouse Request</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="noticeModal" class="modal-bg">
+    <div class="modal-card">
+      <h2>Important Notice</h2>
+      <p>{{ popup_message }}</p>
+      <button type="button" class="primary-btn" onclick="acceptPrimaryNotice()">Accept</button>
+    </div>
+  </div>
+
+  {% if technician_message %}
+  <div id="adminMessageModal" class="modal-bg hidden">
+    <div class="modal-card">
+      <h2>Message from Admin</h2>
+      <p>{{ technician_message }}</p>
+      <button type="button" class="primary-btn" onclick="acceptAdminNotice()">Accept</button>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="page-shell">
+    <div class="glass-bg"></div>
+
+    <div class="main-card">
+      <div class="brand-row">
+        <div class="brand-badge">WH</div>
+        <div>
+          <h1>Equipment Order</h1>
+          <p class="subtitle">Professional warehouse request entry</p>
+        </div>
+      </div>
+
+      {% if form_error %}
+      <div class="error-card">
+        <div class="error-line">{{ form_error }}</div>
+      </div>
+      {% endif %}
+
+      <div class="limits-note">
+        Limits shown below are controlled by admin and can change at any time.
+      </div>
+
+      <form id="requestForm" action="{{ url_for('create_order') }}" method="post" novalidate>
+        <input type="hidden" name="telegram_user_id" id="telegram_user_id" value="">
+        <input type="hidden" name="telegram_username" id="telegram_username" value="">
+
+        <div class="form-section">
+          <label for="tech_id">Tech ID</label>
+          <input
+            id="tech_id"
+            name="tech_id"
+            type="text"
+            required
+            autocomplete="off"
+            value="{{ form_data.tech_id if form_data else '' }}"
+          >
+        </div>
+
+        <div class="form-section">
+          <label for="bp_number">BP Number</label>
+          <input
+            id="bp_number"
+            name="bp_number"
+            type="text"
+            required
+            autocomplete="off"
+            value="{{ form_data.bp_number if form_data else '' }}"
+          >
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">Modems</div>
+          <div class="limits-note">Total category limit: {{ limits.modems_total }}</div>
+          <div class="equipment-grid">
+            {% for item_key, item_label in [('xb3','XB3'),('xb6','XB6'),('xb7','XB7'),('xb8','XB8'),('xb10','XB10')] %}
+            <div class="qty-card">
+              <div class="qty-name">{{ item_label }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('{{ item_key }}', -1, 999, 'modems')">−</button>
+                <input
+                  class="qty-input"
+                  id="{{ item_key }}"
+                  name="{{ item_key }}"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value="{{ form_data[item_key] if form_data else 0 }}"
+                  data-group="modems"
+                  data-max="999"
+                >
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('{{ item_key }}', 1, 999, 'modems')">+</button>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">DVR</div>
+          <div class="limits-note">Total category limit: {{ limits.dvr_total }}</div>
+          <div class="equipment-grid">
+            {% for item_key, item_label in [('xg1','XG1'),('xg1_4k','XG1 4K')] %}
+            <div class="qty-card">
+              <div class="qty-name">{{ item_label }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('{{ item_key }}', -1, 999, 'dvr')">−</button>
+                <input
+                  class="qty-input"
+                  id="{{ item_key }}"
+                  name="{{ item_key }}"
+                  type="number"
+                  min="0"
+                  step="1"
+                  value="{{ form_data[item_key] if form_data else 0 }}"
+                  data-group="dvr"
+                  data-max="999"
+                >
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('{{ item_key }}', 1, 999, 'dvr')">+</button>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">Video & Internet Devices</div>
+          <div class="equipment-grid">
+            <div class="qty-card">
+              <div class="qty-name">XG2</div>
+              <div class="limits-note">Max: {{ limits.xg2 }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('xg2', -1, {{ limits.xg2 }})">−</button>
+                <input class="qty-input" id="xg2" name="xg2" type="number" min="0" max="{{ limits.xg2 }}" step="1" value="{{ form_data.xg2 if form_data else 0 }}" data-max="{{ limits.xg2 }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('xg2', 1, {{ limits.xg2 }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">XID</div>
+              <div class="limits-note">Max: {{ limits.xid }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('xid', -1, {{ limits.xid }})">−</button>
+                <input class="qty-input" id="xid" name="xid" type="number" min="0" max="{{ limits.xid }}" step="1" value="{{ form_data.xid if form_data else 0 }}" data-max="{{ limits.xid }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('xid', 1, {{ limits.xid }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">XI6</div>
+              <div class="limits-note">Max: {{ limits.xi6 }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('xi6', -1, {{ limits.xi6 }})">−</button>
+                <input class="qty-input" id="xi6" name="xi6" type="number" min="0" max="{{ limits.xi6 }}" step="1" value="{{ form_data.xi6 if form_data else 0 }}" data-max="{{ limits.xi6 }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('xi6', 1, {{ limits.xi6 }})">+</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">EPON</div>
+          <div class="equipment-grid">
+            <div class="qty-card">
+              <div class="qty-name">XER10</div>
+              <div class="limits-note">Max: {{ limits.xer10 }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('xer10', -1, {{ limits.xer10 }})">−</button>
+                <input class="qty-input" id="xer10" name="xer10" type="number" min="0" max="{{ limits.xer10 }}" step="1" value="{{ form_data.xer10 if form_data else 0 }}" data-max="{{ limits.xer10 }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('xer10', 1, {{ limits.xer10 }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">ONU</div>
+              <div class="limits-note">Max: {{ limits.onu }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('onu', -1, {{ limits.onu }})">−</button>
+                <input class="qty-input" id="onu" name="onu" type="number" min="0" max="{{ limits.onu }}" step="1" value="{{ form_data.onu if form_data else 0 }}" data-max="{{ limits.onu }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('onu', 1, {{ limits.onu }})">+</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">Home Security</div>
+          <div class="equipment-grid">
+            <div class="qty-card">
+              <div class="qty-name">Screen</div>
+              <div class="limits-note">Max: {{ limits.screen }}</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('screen', -1, {{ limits.screen }})">−</button>
+                <input class="qty-input" id="screen" name="screen" type="number" min="0" max="{{ limits.screen }}" step="1" value="{{ form_data.screen if form_data else 0 }}" data-max="{{ limits.screen }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('screen', 1, {{ limits.screen }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">Battery</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('battery', -1, {{ limits.battery }})">−</button>
+                <input class="qty-input" id="battery" name="battery" type="number" min="0" max="{{ limits.battery }}" step="1" value="{{ form_data.battery if form_data else 0 }}" data-max="{{ limits.battery }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('battery', 1, {{ limits.battery }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">Sensor</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('sensor', -1, {{ limits.sensor }})">−</button>
+                <input class="qty-input" id="sensor" name="sensor" type="number" min="0" max="{{ limits.sensor }}" step="1" value="{{ form_data.sensor if form_data else 0 }}" data-max="{{ limits.sensor }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('sensor', 1, {{ limits.sensor }})">+</button>
+              </div>
+            </div>
+
+            <div class="qty-card">
+              <div class="qty-name">Camera</div>
+              <div class="qty-controls">
+                <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('camera', -1, {{ limits.camera }})">−</button>
+                <input class="qty-input" id="camera" name="camera" type="number" min="0" max="{{ limits.camera }}" step="1" value="{{ form_data.camera if form_data else 0 }}" data-max="{{ limits.camera }}">
+                <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('camera', 1, {{ limits.camera }})">+</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-title">Add Item</div>
+          <div class="limits-note">Max quantity: {{ limits.extra_item }}</div>
+          <div class="form-section">
+            <label for="extra_item_name">Item Name</label>
+            <input
+              id="extra_item_name"
+              name="extra_item_name"
+              type="text"
+              autocomplete="off"
+              value="{{ form_data.extra_item_name if form_data else '' }}"
+            >
+          </div>
+          <div class="qty-card">
+            <div class="qty-name">Additional Item Quantity</div>
+            <div class="qty-controls">
+              <button type="button" class="qty-btn" data-role="minus" onclick="adjustQty('extra_item_qty', -1, {{ limits.extra_item }})">−</button>
+              <input class="qty-input" id="extra_item_qty" name="extra_item_qty" type="number" min="0" max="{{ limits.extra_item }}" step="1" value="{{ form_data.extra_item_qty if form_data else 0 }}" data-max="{{ limits.extra_item }}">
+              <button type="button" class="qty-btn" data-role="plus" onclick="adjustQty('extra_item_qty', 1, {{ limits.extra_item }})">+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <label for="notes">Notes</label>
+          <textarea id="notes" name="notes">{{ form_data.notes if form_data else '' }}</textarea>
+        </div>
+
+        <button id="submitBtn" type="submit" class="primary-btn">Send Request to WH</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    window.APP_LIMITS = {{ limits | tojson }};
+    window.HAS_ADMIN_MESSAGE = {{ 'true' if technician_message else 'false' }};
+  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

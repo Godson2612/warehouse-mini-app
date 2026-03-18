@@ -1,39 +1,37 @@
 import os
 import io
 import csv
-import logging
+import json
 import sqlite3
+import logging
 import threading
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import closing
 
 from flask import Flask, request, jsonify, redirect, Response, render_template
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    WebAppInfo,
-    InputFile,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = os.getenv("8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY", "")
+TECH_BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    "8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY",
+)
+ADMIN_BOT_TOKEN = os.getenv(
+    "ADMIN_BOT_TOKEN",
+    "8798395520:AAGadGCNtPmgXUv_eUfdQmyfVz57JygDYdc",
+)
 BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com").rstrip("/")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
 DB_PATH = os.getenv("DB_PATH", "orders.db")
-DEFAULT_AUTO_EXPORT_HOUR = int(os.getenv("DEFAULT_AUTO_EXPORT_HOUR", "21"))
+SECRET_KEY = os.getenv("SECRET_KEY", "warehouse-secret-key")
+ADMIN_ACCESS_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
 
 TZ = ZoneInfo(APP_TIMEZONE)
 
@@ -44,13 +42,11 @@ logging.basicConfig(
 logger = logging.getLogger("warehouse_app")
 
 app = Flask(__name__)
-scheduler = BackgroundScheduler(timezone=APP_TIMEZONE)
+app.secret_key = SECRET_KEY
 
-telegram_app = None
-if BOT_TOKEN:
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-else:
-    logger.warning("BOT_TOKEN is not configured. Telegram bot features will be disabled.")
+tech_bot_app = None
+if TECH_BOT_TOKEN:
+    tech_bot_app = Application.builder().token(TECH_BOT_TOKEN).build()
 
 # ============================================================
 # DATABASE
@@ -62,14 +58,32 @@ CREATE TABLE IF NOT EXISTS orders (
     created_date TEXT NOT NULL,
     telegram_user_id INTEGER,
     telegram_username TEXT,
-    technician_name TEXT,
+    tech_id TEXT NOT NULL,
     bp_number TEXT NOT NULL,
-    xg1v4 INTEGER NOT NULL DEFAULT 0,
-    xi6 INTEGER NOT NULL DEFAULT 0,
+
+    xb3 INTEGER NOT NULL DEFAULT 0,
+    xb6 INTEGER NOT NULL DEFAULT 0,
+    xb7 INTEGER NOT NULL DEFAULT 0,
+    xb8 INTEGER NOT NULL DEFAULT 0,
+    xb10 INTEGER NOT NULL DEFAULT 0,
+
+    xg1 INTEGER NOT NULL DEFAULT 0,
+    xg1_4k INTEGER NOT NULL DEFAULT 0,
+    xg2 INTEGER NOT NULL DEFAULT 0,
     xid INTEGER NOT NULL DEFAULT 0,
-    xct2 INTEGER NOT NULL DEFAULT 0,
-    ddr INTEGER NOT NULL DEFAULT 0,
-    notes TEXT DEFAULT ''
+    xi6 INTEGER NOT NULL DEFAULT 0,
+    xer10 INTEGER NOT NULL DEFAULT 0,
+    onu INTEGER NOT NULL DEFAULT 0,
+
+    screen INTEGER NOT NULL DEFAULT 0,
+    battery INTEGER NOT NULL DEFAULT 0,
+    sensor INTEGER NOT NULL DEFAULT 0,
+    camera INTEGER NOT NULL DEFAULT 0,
+
+    extra_item_name TEXT NOT NULL DEFAULT '',
+    extra_item_qty INTEGER NOT NULL DEFAULT 0,
+
+    notes TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -83,6 +97,22 @@ CREATE TABLE IF NOT EXISTS admin_users (
 );
 """
 
+DEFAULT_SETTINGS = {
+    "limit_modems_total": "12",
+    "limit_dvr_total": "5",
+    "limit_xg2": "5",
+    "limit_xid": "12",
+    "limit_xi6": "12",
+    "limit_xer10": "2",
+    "limit_onu": "2",
+    "limit_screen": "5",
+    "limit_battery": "50",
+    "limit_sensor": "50",
+    "limit_camera": "50",
+    "limit_extra_item": "10",
+    "technician_message": "",
+}
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -93,33 +123,47 @@ def get_db():
 def init_db():
     with closing(get_db()) as conn:
         conn.executescript(SCHEMA_SQL)
+        for key, value in DEFAULT_SETTINGS.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+                (key, value),
+            )
         conn.commit()
-        ensure_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR))
 
 
-def ensure_setting(key: str, value: str):
+def get_setting(key: str, default: str = "") -> str:
     with closing(get_db()) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
-            (key, value),
-        )
-        conn.commit()
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
 
 
 def set_setting(key: str, value: str):
     with closing(get_db()) as conn:
         conn.execute(
-            "INSERT INTO settings(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            """
+            INSERT INTO settings(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
             (key, value),
         )
         conn.commit()
 
 
-def get_setting(key: str, default=None):
-    with closing(get_db()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else default
+def get_limits():
+    return {
+        "modems_total": int(get_setting("limit_modems_total", "12")),
+        "dvr_total": int(get_setting("limit_dvr_total", "5")),
+        "xg2": int(get_setting("limit_xg2", "5")),
+        "xid": int(get_setting("limit_xid", "12")),
+        "xi6": int(get_setting("limit_xi6", "12")),
+        "xer10": int(get_setting("limit_xer10", "2")),
+        "onu": int(get_setting("limit_onu", "2")),
+        "screen": int(get_setting("limit_screen", "5")),
+        "battery": int(get_setting("limit_battery", "50")),
+        "sensor": int(get_setting("limit_sensor", "50")),
+        "camera": int(get_setting("limit_camera", "50")),
+        "extra_item": int(get_setting("limit_extra_item", "10")),
+    }
 
 
 def add_admin_user(user_id: int):
@@ -141,6 +185,13 @@ def is_admin(user_id: int) -> bool:
         return row is not None
 
 
+def parse_int(value, default=0):
+    try:
+        return max(0, int(str(value).strip() or default))
+    except Exception:
+        return default
+
+
 def save_order(payload: dict):
     now = datetime.now(TZ)
     with closing(get_db()) as conn:
@@ -148,25 +199,55 @@ def save_order(payload: dict):
             """
             INSERT INTO orders (
                 created_at, created_date, telegram_user_id, telegram_username,
-                technician_name, bp_number, xg1v4, xi6, xid, xct2, ddr, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tech_id, bp_number,
+                xb3, xb6, xb7, xb8, xb10,
+                xg1, xg1_4k, xg2, xid, xi6, xer10, onu,
+                screen, battery, sensor, camera,
+                extra_item_name, extra_item_qty, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now.isoformat(),
                 now.date().isoformat(),
                 payload.get("telegram_user_id"),
                 payload.get("telegram_username", ""),
-                payload.get("technician_name", ""),
+                payload["tech_id"],
                 payload["bp_number"],
-                int(payload.get("xg1v4", 0)),
-                int(payload.get("xi6", 0)),
-                int(payload.get("xid", 0)),
-                int(payload.get("xct2", 0)),
-                int(payload.get("ddr", 0)),
+                payload.get("xb3", 0),
+                payload.get("xb6", 0),
+                payload.get("xb7", 0),
+                payload.get("xb8", 0),
+                payload.get("xb10", 0),
+                payload.get("xg1", 0),
+                payload.get("xg1_4k", 0),
+                payload.get("xg2", 0),
+                payload.get("xid", 0),
+                payload.get("xi6", 0),
+                payload.get("xer10", 0),
+                payload.get("onu", 0),
+                payload.get("screen", 0),
+                payload.get("battery", 0),
+                payload.get("sensor", 0),
+                payload.get("camera", 0),
+                payload.get("extra_item_name", ""),
+                payload.get("extra_item_qty", 0),
                 payload.get("notes", ""),
             ),
         )
         conn.commit()
+
+
+def fetch_recent_orders(limit=20):
+    with closing(get_db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM orders
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def fetch_orders_for_day(day_iso: str):
@@ -178,49 +259,6 @@ def fetch_orders_for_day(day_iso: str):
         return [dict(r) for r in rows]
 
 
-def get_daily_stats(day_iso: str):
-    with closing(get_db()) as conn:
-        row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS total_orders,
-                COALESCE(SUM(xg1v4), 0) AS xg1v4,
-                COALESCE(SUM(xi6), 0) AS xi6,
-                COALESCE(SUM(xid), 0) AS xid,
-                COALESCE(SUM(xct2), 0) AS xct2,
-                COALESCE(SUM(ddr), 0) AS ddr
-            FROM orders
-            WHERE created_date=?
-            """,
-            (day_iso,),
-        ).fetchone()
-
-        by_tech = conn.execute(
-            """
-            SELECT
-                COALESCE(technician_name, '') AS technician_name,
-                bp_number,
-                COUNT(*) AS orders,
-                COALESCE(SUM(xg1v4), 0) AS xg1v4,
-                COALESCE(SUM(xi6), 0) AS xi6,
-                COALESCE(SUM(xid), 0) AS xid,
-                COALESCE(SUM(xct2), 0) AS xct2,
-                COALESCE(SUM(ddr), 0) AS ddr
-            FROM orders
-            WHERE created_date=?
-            GROUP BY technician_name, bp_number
-            ORDER BY technician_name, bp_number
-            """,
-            (day_iso,),
-        ).fetchall()
-
-        return {
-            "date": day_iso,
-            "summary": dict(row) if row else {},
-            "by_technician": [dict(r) for r in by_tech],
-        }
-
-
 def build_daily_csv_bytes(day_iso: str) -> bytes:
     orders = fetch_orders_for_day(day_iso)
     output = io.StringIO()
@@ -229,13 +267,26 @@ def build_daily_csv_bytes(day_iso: str) -> bytes:
         "created_at",
         "telegram_user_id",
         "telegram_username",
-        "technician_name",
+        "tech_id",
         "bp_number",
-        "xg1v4",
-        "xi6",
+        "xb3",
+        "xb6",
+        "xb7",
+        "xb8",
+        "xb10",
+        "xg1",
+        "xg1_4k",
+        "xg2",
         "xid",
-        "xct2",
-        "ddr",
+        "xi6",
+        "xer10",
+        "onu",
+        "screen",
+        "battery",
+        "sensor",
+        "camera",
+        "extra_item_name",
+        "extra_item_qty",
         "notes",
     ])
     for row in orders:
@@ -243,47 +294,96 @@ def build_daily_csv_bytes(day_iso: str) -> bytes:
             row["created_at"],
             row["telegram_user_id"],
             row["telegram_username"],
-            row["technician_name"],
+            row["tech_id"],
             row["bp_number"],
-            row["xg1v4"],
-            row["xi6"],
+            row["xb3"],
+            row["xb6"],
+            row["xb7"],
+            row["xb8"],
+            row["xb10"],
+            row["xg1"],
+            row["xg1_4k"],
+            row["xg2"],
             row["xid"],
-            row["xct2"],
-            row["ddr"],
+            row["xi6"],
+            row["xer10"],
+            row["onu"],
+            row["screen"],
+            row["battery"],
+            row["sensor"],
+            row["camera"],
+            row["extra_item_name"],
+            row["extra_item_qty"],
             row["notes"],
         ])
     return output.getvalue().encode("utf-8-sig")
 
 
-def stats_to_text(day_iso: str) -> str:
-    stats = get_daily_stats(day_iso)
-    s = stats["summary"]
-    lines = [
-        f"📊 Daily Stats - {day_iso}",
-        f"Total orders: {s.get('total_orders', 0)}",
-        f"XG1v4: {s.get('xg1v4', 0)}",
-        f"XI6: {s.get('xi6', 0)}",
-        f"XID: {s.get('xid', 0)}",
-        f"XCT2: {s.get('xct2', 0)}",
-        f"DDR: {s.get('ddr', 0)}",
-        "",
-        "By technician:",
-    ]
-    if not stats["by_technician"]:
-        lines.append("- No orders for this date.")
-    else:
-        for row in stats["by_technician"]:
-            tech = row["technician_name"] or "Unknown"
-            lines.append(
-                f"- {tech} | BP {row['bp_number']} | Orders {row['orders']} | "
-                f"XG1v4 {row['xg1v4']} | XI6 {row['xi6']} | XID {row['xid']} | "
-                f"XCT2 {row['xct2']} | DDR {row['ddr']}"
-            )
-    return "\n".join(lines)
+def validate_payload(payload: dict):
+    limits = get_limits()
+
+    tech_id = payload["tech_id"].strip()
+    bp_number = payload["bp_number"].strip()
+
+    if not tech_id:
+        return "Tech ID is required."
+    if not bp_number:
+        return "BP Number is required."
+
+    modem_total = payload["xb3"] + payload["xb6"] + payload["xb7"] + payload["xb8"] + payload["xb10"]
+    dvr_total = payload["xg1"] + payload["xg1_4k"]
+
+    if modem_total > limits["modems_total"]:
+        return f"Modem category limit reached. Maximum allowed is {limits['modems_total']}."
+    if dvr_total > limits["dvr_total"]:
+        return f"DVR category limit reached. Maximum allowed is {limits['dvr_total']}."
+    if payload["xg2"] > limits["xg2"]:
+        return f"XG2 limit reached. Maximum allowed is {limits['xg2']}."
+    if payload["xid"] > limits["xid"]:
+        return f"XID limit reached. Maximum allowed is {limits['xid']}."
+    if payload["xi6"] > limits["xi6"]:
+        return f"XI6 limit reached. Maximum allowed is {limits['xi6']}."
+    if payload["xer10"] > limits["xer10"]:
+        return f"XER10 limit reached. Maximum allowed is {limits['xer10']}."
+    if payload["onu"] > limits["onu"]:
+        return f"ONU limit reached. Maximum allowed is {limits['onu']}."
+    if payload["screen"] > limits["screen"]:
+        return f"Screen limit reached. Maximum allowed is {limits['screen']}."
+    if payload["battery"] > limits["battery"]:
+        return f"Battery limit reached. Maximum allowed is {limits['battery']}."
+    if payload["sensor"] > limits["sensor"]:
+        return f"Sensor limit reached. Maximum allowed is {limits['sensor']}."
+    if payload["camera"] > limits["camera"]:
+        return f"Camera limit reached. Maximum allowed is {limits['camera']}."
+
+    if payload["extra_item_qty"] > 0 and not payload["extra_item_name"].strip():
+        return "Please enter the item name for Add Item."
+
+    if payload["extra_item_qty"] > limits["extra_item"]:
+        return f"Additional item limit reached. Maximum allowed is {limits['extra_item']}."
+
+    grand_total = (
+        modem_total
+        + dvr_total
+        + payload["xg2"]
+        + payload["xid"]
+        + payload["xi6"]
+        + payload["xer10"]
+        + payload["onu"]
+        + payload["screen"]
+        + payload["battery"]
+        + payload["sensor"]
+        + payload["camera"]
+        + payload["extra_item_qty"]
+    )
+    if grand_total <= 0:
+        return "Please add at least one equipment item."
+
+    return None
 
 
 # ============================================================
-# TELEGRAM BOT
+# TECH BOT
 # ============================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -291,197 +391,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton(
             text="Open Order App",
             web_app=WebAppInfo(
-                url=f"{BASE_URL}/webapp?uid={user.id}&name={user.full_name}&username={user.username or ''}"
+                url=f"{BASE_URL}/webapp?uid={user.id}&username={user.username or ''}"
             ),
         )
     ]]
     await update.message.reply_text(
-        "Open the app to submit warehouse requests.",
+        "Open the app to submit equipment requests.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized. You are not an admin.")
+def register_tech_handlers():
+    if tech_bot_app is None:
         return
-
-    hour = get_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR))
-    msg = (
-        "🔐 Admin Panel\n\n"
-        "Commands:\n"
-        "/stats - show today's stats\n"
-        "/export - export today's CSV here in Telegram\n"
-        "/exportdate YYYY-MM-DD - export any date\n"
-        "/sethour HH - set automatic daily export hour (0-23)\n"
-        f"\nCurrent automatic export hour: {hour}:00 ({APP_TIMEZONE})"
-    )
-    await update.message.reply_text(msg)
+    tech_bot_app.add_handler(CommandHandler("start", start_command))
 
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized.")
-        return
-    today = datetime.now(TZ).date().isoformat()
-    await update.message.reply_text(stats_to_text(today))
-
-
-async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized.")
-        return
-    today = datetime.now(TZ).date().isoformat()
-    await send_daily_export_to_chat(context, update.effective_chat.id, today)
-
-
-async def export_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Use: /exportdate YYYY-MM-DD")
-        return
-
-    day_iso = context.args[0]
-    try:
-        datetime.strptime(day_iso, "%Y-%m-%d")
-    except ValueError:
-        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD")
-        return
-
-    await send_daily_export_to_chat(context, update.effective_chat.id, day_iso)
-
-
-async def set_hour_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("Unauthorized.")
-        return
-
-    if not context.args:
-        await update.message.reply_text("Use: /sethour HH")
-        return
-
-    try:
-        hour = int(context.args[0])
-        if hour < 0 or hour > 23:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Hour must be a number from 0 to 23.")
-        return
-
-    set_setting("auto_export_hour", str(hour))
-    reschedule_auto_export(hour)
-    await update.message.reply_text(
-        f"✅ Automatic daily export set to {hour:02d}:00 ({APP_TIMEZONE})."
-    )
-
-
-async def grant_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Use: /grantadmin YOUR_ADMIN_TOKEN")
-        return
-
-    supplied = context.args[0]
-    if supplied != ADMIN_TOKEN:
-        await update.message.reply_text("Invalid admin token.")
-        return
-
-    user = update.effective_user
-    add_admin_user(user.id)
-    await update.message.reply_text("✅ Admin access granted to your Telegram account.")
-
-
-async def send_daily_export_to_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, day_iso: str):
-    csv_bytes = build_daily_csv_bytes(day_iso)
-    caption = stats_to_text(day_iso)
-    input_file = InputFile(io.BytesIO(csv_bytes), filename=f"orders_{day_iso}.csv")
-    await context.bot.send_document(
-        chat_id=chat_id,
-        document=input_file,
-        caption=caption[:1024],
-    )
-
-
-async def auto_export_job():
-    if telegram_app is None:
-        return
-
-    today = datetime.now(TZ).date().isoformat()
-    with closing(get_db()) as conn:
-        admins = conn.execute("SELECT telegram_user_id FROM admin_users").fetchall()
-
-    if not admins:
-        logger.info("No admin users registered. Skipping auto export.")
-        return
-
-    for row in admins:
-        try:
-            csv_bytes = build_daily_csv_bytes(today)
-            caption = stats_to_text(today)
-            input_file = InputFile(io.BytesIO(csv_bytes), filename=f"orders_{today}.csv")
-            await telegram_app.bot.send_document(
-                chat_id=row["telegram_user_id"],
-                document=input_file,
-                caption=caption[:1024],
-            )
-        except Exception as exc:
-            logger.exception(
-                "Failed sending auto export to admin %s: %s",
-                row["telegram_user_id"],
-                exc,
-            )
-
-
-def run_auto_export_job():
-    if telegram_app is None:
+def run_tech_bot():
+    if tech_bot_app is None:
+        logger.info("Tech bot disabled.")
         return
     try:
-        import asyncio
-        asyncio.run(auto_export_job())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        register_tech_handlers()
+        logger.info("Tech bot started.")
+        tech_bot_app.run_polling(close_loop=False)
     except Exception as exc:
-        logger.exception("Auto export job failed: %s", exc)
-
-
-def reschedule_auto_export(hour: int):
-    if scheduler.get_job("daily_export"):
-        scheduler.remove_job("daily_export")
-
-    scheduler.add_job(
-        func=run_auto_export_job,
-        trigger="cron",
-        id="daily_export",
-        hour=hour,
-        minute=0,
-        replace_existing=True,
-    )
-    logger.info("Auto export scheduled at %02d:00 %s", hour, APP_TIMEZONE)
-
-
-def register_handlers():
-    if telegram_app is None:
-        return
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("admin", admin_command))
-    telegram_app.add_handler(CommandHandler("stats", stats_command))
-    telegram_app.add_handler(CommandHandler("export", export_command))
-    telegram_app.add_handler(CommandHandler("exportdate", export_date_command))
-    telegram_app.add_handler(CommandHandler("sethour", set_hour_command))
-    telegram_app.add_handler(CommandHandler("grantadmin", grant_admin_command))
-
-
-def run_bot():
-    if telegram_app is None:
-        logger.info("Telegram bot not started because BOT_TOKEN is missing.")
-        return
-    register_handlers()
-    telegram_app.run_polling(close_loop=False)
+        logger.exception("Tech bot failed: %s", exc)
 
 
 # ============================================================
@@ -489,66 +426,118 @@ def run_bot():
 # ============================================================
 @app.get("/")
 def root():
-    ensure_app_started()
     return redirect("/webapp")
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True})
 
 
 @app.get("/webapp")
 def webapp_page():
-    ensure_app_started()
-    return render_template("request_form.html")
+    limits = get_limits()
+    technician_message = get_setting("technician_message", "")
+    popup_message = (
+        "Badge is required to pick up equipment. "
+        "The warehouse closes at 9:00 AM. "
+        "Please check your buffer first. "
+        f"Maximum allowed quantities: "
+        f"Modems {limits['modems_total']} total, "
+        f"XI6 {limits['xi6']}, "
+        f"XID {limits['xid']}, "
+        f"XG2 {limits['xg2']}, "
+        f"DVR {limits['dvr_total']} total, "
+        f"XER10 {limits['xer10']}, "
+        f"ONU {limits['onu']}, "
+        f"Screen {limits['screen']}, "
+        f"Additional Item {limits['extra_item']}."
+    )
+    return render_template(
+        "request_form.html",
+        limits=limits,
+        popup_message=popup_message,
+        technician_message=technician_message,
+    )
 
 
-@app.post("/api/orders")
+@app.post("/create-order")
 def create_order():
-    ensure_app_started()
-
-    data = request.get_json(silent=True) or {}
-    bp_number = str(data.get("bp_number", "")).strip()
-
-    if not bp_number:
-        return jsonify({"error": "BP Number is required."}), 400
-
     payload = {
-        "telegram_user_id": data.get("telegram_user_id"),
-        "telegram_username": data.get("telegram_username", ""),
-        "technician_name": str(data.get("technician_name", "")).strip(),
-        "bp_number": bp_number,
-        "xg1v4": int(data.get("xg1v4", 0) or 0),
-        "xi6": int(data.get("xi6", 0) or 0),
-        "xid": int(data.get("xid", 0) or 0),
-        "xct2": int(data.get("xct2", 0) or 0),
-        "ddr": int(data.get("ddr", 0) or 0),
-        "notes": str(data.get("notes", "")).strip(),
+        "telegram_user_id": request.form.get("telegram_user_id"),
+        "telegram_username": request.form.get("telegram_username", "").strip(),
+        "tech_id": request.form.get("tech_id", "").strip(),
+        "bp_number": request.form.get("bp_number", "").strip(),
+
+        "xb3": parse_int(request.form.get("xb3")),
+        "xb6": parse_int(request.form.get("xb6")),
+        "xb7": parse_int(request.form.get("xb7")),
+        "xb8": parse_int(request.form.get("xb8")),
+        "xb10": parse_int(request.form.get("xb10")),
+
+        "xg1": parse_int(request.form.get("xg1")),
+        "xg1_4k": parse_int(request.form.get("xg1_4k")),
+        "xg2": parse_int(request.form.get("xg2")),
+        "xid": parse_int(request.form.get("xid")),
+        "xi6": parse_int(request.form.get("xi6")),
+        "xer10": parse_int(request.form.get("xer10")),
+        "onu": parse_int(request.form.get("onu")),
+
+        "screen": parse_int(request.form.get("screen")),
+        "battery": parse_int(request.form.get("battery")),
+        "sensor": parse_int(request.form.get("sensor")),
+        "camera": parse_int(request.form.get("camera")),
+
+        "extra_item_name": request.form.get("extra_item_name", "").strip(),
+        "extra_item_qty": parse_int(request.form.get("extra_item_qty")),
+        "notes": request.form.get("notes", "").strip(),
     }
 
+    error = validate_payload(payload)
+    if error:
+        limits = get_limits()
+        technician_message = get_setting("technician_message", "")
+        popup_message = (
+            "Badge is required to pick up equipment. "
+            "The warehouse closes at 9:00 AM. "
+            "Please check your buffer first. "
+            f"Maximum allowed quantities: "
+            f"Modems {limits['modems_total']} total, "
+            f"XI6 {limits['xi6']}, "
+            f"XID {limits['xid']}, "
+            f"XG2 {limits['xg2']}, "
+            f"DVR {limits['dvr_total']} total, "
+            f"XER10 {limits['xer10']}, "
+            f"ONU {limits['onu']}, "
+            f"Screen {limits['screen']}, "
+            f"Additional Item {limits['extra_item']}."
+        )
+        return render_template(
+            "request_form.html",
+            limits=limits,
+            popup_message=popup_message,
+            technician_message=technician_message,
+            form_data=payload,
+            form_error=error,
+        ), 400
+
     save_order(payload)
-    return jsonify({"ok": True, "message": "Order submitted successfully."})
 
-
-@app.get("/admin/stats")
-def admin_stats_api():
-    ensure_app_started()
-
-    token = request.args.get("token", "")
-    if token != ADMIN_TOKEN:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
-    return jsonify(get_daily_stats(day_iso))
+    return render_template(
+        "success.html",
+        confirmation_message="Your request was sent to WH successfully.",
+        bp_number=payload["bp_number"],
+    )
 
 
 @app.get("/admin/export")
 def admin_export_api():
-    ensure_app_started()
-
     token = request.args.get("token", "")
-    if token != ADMIN_TOKEN:
+    if token != ADMIN_ACCESS_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
 
     day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
     csv_bytes = build_daily_csv_bytes(day_iso)
-
     return Response(
         csv_bytes,
         mimetype="text/csv",
@@ -557,42 +546,25 @@ def admin_export_api():
 
 
 # ============================================================
-# APP STARTUP
+# STARTUP
 # ============================================================
 _started = False
 _start_lock = threading.Lock()
-
-
-def setup_scheduler():
-    hour = int(get_setting("auto_export_hour", str(DEFAULT_AUTO_EXPORT_HOUR)))
-    if not scheduler.running:
-        scheduler.start()
-    reschedule_auto_export(hour)
-
-
-def start_background_services():
-    if telegram_app is not None:
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        logger.info("Telegram bot thread started.")
-    else:
-        logger.info("Telegram bot disabled.")
-
-    setup_scheduler()
-    logger.info("Scheduler started.")
 
 
 def ensure_app_started():
     global _started
     if _started:
         return
-
     with _start_lock:
         if _started:
             return
-
         init_db()
-        start_background_services()
+
+        if tech_bot_app is not None:
+            bot_thread = threading.Thread(target=run_tech_bot, daemon=True)
+            bot_thread.start()
+
         _started = True
         logger.info("Application startup completed.")
 

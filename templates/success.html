@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+  >
+  <title>Request Submitted</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body data-success-message="{{ confirmation_message }}">
+  <div class="page-shell">
+    <div class="glass-bg"></div>
+
+    <div class="main-card success-card">
+      <div class="success-badge">✓</div>
+      <h1>Request Submitted</h1>
+      <p class="subtitle center-text">{{ confirmation_message }}</p>
+
+      <div class="success-panel">
+        <div class="success-row">
+          <span>BP Number</span>
+          <strong>{{ bp_number }}</strong>
+        </div>
+      </div>
+
+      <a href="{{ url_for('webapp_page') }}" class="primary-btn link-btn">Submit Another Request</a>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
