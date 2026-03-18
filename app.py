@@ -135,6 +135,33 @@ DEFAULT_SETTINGS = {
     "technician_message_active_until": "",
 }
 
+EQUIPMENT_LABELS = {
+    "xb3": "XB3",
+    "xb6": "XB6",
+    "xb7": "XB7",
+    "xb8": "XB8",
+    "xb10": "XB10",
+    "xg1": "XG1",
+    "xg1_4k": "XG1 4K",
+    "xg2": "XG2",
+    "xid": "XID",
+    "xi6": "XI6",
+    "xer10": "XER10",
+    "onu": "ONU",
+    "screen": "Screen",
+    "battery": "Battery",
+    "sensor": "Sensor",
+    "camera": "Camera",
+    "extra_item_qty": "Additional Item",
+}
+
+EQUIPMENT_ORDER = [
+    "xb3", "xb6", "xb7", "xb8", "xb10",
+    "xg1", "xg1_4k", "xg2", "xid", "xi6",
+    "xer10", "onu", "screen", "battery", "sensor", "camera",
+    "extra_item_qty",
+]
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -214,8 +241,20 @@ def parse_int(value, default=0):
         return default
 
 
+def now_local() -> datetime:
+    return datetime.now(TZ)
+
+
+def today_iso() -> str:
+    return now_local().date().isoformat()
+
+
+def yesterday_iso() -> str:
+    return (now_local().date() - timedelta(days=1)).isoformat()
+
+
 def get_end_of_today_iso() -> str:
-    now = datetime.now(TZ)
+    now = now_local()
     end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
     return end_of_day.isoformat()
 
@@ -234,7 +273,7 @@ def get_active_message_info():
         set_setting("technician_message_active_until", "")
         return "", ""
 
-    now = datetime.now(TZ)
+    now = now_local()
     if now > expires_at:
         set_setting("technician_message", "")
         set_setting("technician_message_active_until", "")
@@ -260,7 +299,7 @@ def clear_technician_message():
 
 
 def save_order(payload: dict):
-    now = datetime.now(TZ)
+    now = now_local()
     with closing(get_db()) as conn:
         conn.execute(
             """
@@ -333,6 +372,13 @@ def fetch_orders_since(start_date_iso: str):
             (start_date_iso,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def delete_orders_for_day(day_iso: str) -> int:
+    with closing(get_db()) as conn:
+        cur = conn.execute("DELETE FROM orders WHERE created_date=?", (day_iso,))
+        conn.commit()
+        return cur.rowcount or 0
 
 
 def build_daily_csv_bytes(day_iso: str) -> bytes:
@@ -520,11 +566,44 @@ SETTABLE_LIMITS = {
 }
 
 
+def equipment_totals(rows):
+    totals = {k: 0 for k in EQUIPMENT_ORDER}
+    for row in rows:
+        for k in EQUIPMENT_ORDER:
+            totals[k] += int(row.get(k, 0) or 0)
+    return totals
+
+
+def format_totals_compact(totals: dict) -> str:
+    parts = []
+    for key in EQUIPMENT_ORDER:
+        value = int(totals.get(key, 0) or 0)
+        if value > 0:
+            parts.append(f"{EQUIPMENT_LABELS[key]} {value}")
+    return " | ".join(parts) if parts else "No equipment requested"
+
+
+def format_totals_multiline(totals: dict) -> str:
+    lines = []
+    for key in EQUIPMENT_ORDER:
+        value = int(totals.get(key, 0) or 0)
+        if value > 0:
+            lines.append(f"- {EQUIPMENT_LABELS[key]}: {value}")
+    return "\n".join(lines) if lines else "- No equipment requested"
+
+
+def build_export_filename(report_day_iso: str, is_excel: bool = True) -> str:
+    stamp = now_local().strftime("%Y-%m-%d_%I-%M-%S_%p")
+    ext = "xlsx" if is_excel else "csv"
+    return f"orders_{report_day_iso}_{stamp}.{ext}"
+
+
 def admin_home_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton("Home"), KeyboardButton("View Orders")],
-            [KeyboardButton("Export Orders"), KeyboardButton("View Statistics")],
+            [KeyboardButton("Orders in Progress"), KeyboardButton("Export Orders")],
+            [KeyboardButton("View Statistics"), KeyboardButton("Reset Today's Orders")],
             [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
         ],
         resize_keyboard=True,
@@ -539,8 +618,10 @@ def admin_main_menu():
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("View Orders", callback_data="view_orders")],
+        [InlineKeyboardButton("Orders in Progress", callback_data="orders_in_progress")],
         [InlineKeyboardButton("Export Orders", callback_data="export_orders")],
         [InlineKeyboardButton("View Statistics", callback_data="view_stats")],
+        [InlineKeyboardButton("Reset Today's Orders", callback_data="reset_today_orders")],
         [InlineKeyboardButton(f"Message for Technicians ({msg_status})", callback_data="message_menu")],
         [InlineKeyboardButton("Set Max Equipment", callback_data="set_limits")],
         [InlineKeyboardButton("Refresh", callback_data="refresh_menu")],
@@ -577,6 +658,13 @@ def admin_limits_menu():
     return InlineKeyboardMarkup(rows)
 
 
+def admin_reset_confirm_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Yes, Continue", callback_data="confirm_reset_today_orders")],
+        [InlineKeyboardButton("Cancel", callback_data="cancel_reset_today_orders")],
+    ])
+
+
 def admin_message_status_text():
     message, active_until = get_active_message_info()
     if not message:
@@ -590,22 +678,8 @@ def admin_message_status_text():
     )
 
 
-def equipment_totals(rows):
-    keys = [
-        "xb3", "xb6", "xb7", "xb8", "xb10",
-        "xg1", "xg1_4k", "xg2", "xid", "xi6",
-        "xer10", "onu", "screen", "battery", "sensor", "camera",
-        "extra_item_qty",
-    ]
-    totals = {k: 0 for k in keys}
-    for row in rows:
-        for k in keys:
-            totals[k] += int(row.get(k, 0) or 0)
-    return totals
-
-
 def weekly_stats_text():
-    start_date = (datetime.now(TZ).date() - timedelta(days=6)).isoformat()
+    start_date = (now_local().date() - timedelta(days=6)).isoformat()
     rows = fetch_orders_since(start_date)
 
     totals = equipment_totals(rows)
@@ -620,7 +694,7 @@ def weekly_stats_text():
 
     lines = [
         "📊 Weekly Statistics",
-        f"Range: {start_date} to {datetime.now(TZ).date().isoformat()}",
+        f"Range: {start_date} to {today_iso()}",
         "",
         "Most requested equipment:",
     ]
@@ -628,7 +702,7 @@ def weekly_stats_text():
     shown_any = False
     for key, value in top_equipment:
         if value > 0:
-            lines.append(f"- {key.upper()}: {value}")
+            lines.append(f"- {EQUIPMENT_LABELS.get(key, key.upper())}: {value}")
             shown_any = True
     if not shown_any:
         lines.append("- No orders this week.")
@@ -644,34 +718,57 @@ def weekly_stats_text():
     return "\n".join(lines)
 
 
-def recent_orders_text():
-    rows = fetch_recent_orders(20)
+def orders_text_for_day(day_iso: str, title: str):
+    rows = fetch_orders_for_day(day_iso)
     if not rows:
-        return "No recent orders found."
+        return f"{title}\nDate: {day_iso}\n\nNo orders found."
 
-    lines = ["📦 Real-time Orders (latest 20)", ""]
+    totals = equipment_totals(rows)
+
+    lines = [
+        title,
+        f"Date: {day_iso}",
+        f"Total orders: {len(rows)}",
+        "",
+        "Equipment totals:",
+        format_totals_multiline(totals),
+        "",
+        "Order details:",
+    ]
+
     for row in rows:
         items = []
-        for key in [
-            "xb3", "xb6", "xb7", "xb8", "xb10",
-            "xg1", "xg1_4k", "xg2", "xid", "xi6",
-            "xer10", "onu", "screen", "battery", "sensor", "camera"
-        ]:
+        for key in EQUIPMENT_ORDER[:-1]:
             qty = int(row.get(key, 0) or 0)
             if qty > 0:
-                items.append(f"{key.upper()} {qty}")
+                items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
 
         extra_name = (row.get("extra_item_name") or "").strip()
         extra_qty = int(row.get("extra_item_qty", 0) or 0)
         if extra_qty > 0:
-            items.append(f"{extra_name or 'ADDITIONAL ITEM'} {extra_qty}")
+            items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
 
         item_text = ", ".join(items) if items else "No items"
+        created_display = row["created_at"][11:19] if row.get("created_at") else "N/A"
         lines.append(
-            f"- {row['created_at'][:19]} | Tech ID {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+            f"- {created_display} | Tech ID {row['tech_id']} | BP {row['bp_number']} | {item_text}"
         )
 
     return "\n".join(lines)
+
+
+def previous_day_orders_text():
+    return orders_text_for_day(
+        yesterday_iso(),
+        "📦 View Orders",
+    )
+
+
+def current_day_orders_text():
+    return orders_text_for_day(
+        today_iso(),
+        "📦 Orders in Progress",
+    )
 
 
 def build_excel_summary(day_iso: str) -> bytes:
@@ -688,15 +785,25 @@ def build_excel_summary(day_iso: str) -> bytes:
 
     wb = Workbook()
 
-    ws_summary = wb.active
-    ws_summary.title = "Summary by Tech"
+    totals = equipment_totals(rows)
 
+    ws_overview = wb.active
+    ws_overview.title = "Overview"
+    ws_overview.append(["Report Date", day_iso])
+    ws_overview.append(["Exported At", now_local().strftime("%Y-%m-%d %I:%M:%S %p")])
+    ws_overview.append(["Total Orders", len(rows)])
+    ws_overview.append([])
+    ws_overview.append(["Equipment", "Total Qty"])
+    for key in EQUIPMENT_ORDER:
+        ws_overview.append([EQUIPMENT_LABELS[key], totals.get(key, 0)])
+
+    ws_summary = wb.create_sheet("Summary by Tech")
     ws_summary.append([
         "Tech ID",
         "BP Number",
         "Orders",
         "XB3", "XB6", "XB7", "XB8", "XB10",
-        "XG1", "XG1_4K", "XG2", "XID", "XI6",
+        "XG1", "XG1 4K", "XG2", "XID", "XI6",
         "XER10", "ONU", "Screen", "Battery", "Sensor", "Camera",
         "Extra Item", "Extra Qty",
     ])
@@ -761,6 +868,28 @@ def build_excel_summary(day_iso: str) -> bytes:
     wb.save(output)
     output.seek(0)
     return output.getvalue()
+
+
+async def send_orders_export(chat_id: int, bot, report_day_iso: str):
+    rows = fetch_orders_for_day(report_day_iso)
+    totals = equipment_totals(rows)
+    file_bytes = build_excel_summary(report_day_iso)
+    is_excel = file_bytes[:2] == b"PK"
+    filename = build_export_filename(report_day_iso, is_excel=is_excel)
+
+    caption_lines = [
+        f"Export for {report_day_iso}",
+        f"Total orders: {len(rows)}",
+        "",
+        "Equipment totals:",
+        format_totals_multiline(totals),
+    ]
+
+    await bot.send_document(
+        chat_id=chat_id,
+        document=InputFile(io.BytesIO(file_bytes), filename=filename),
+        caption="\n".join(caption_lines),
+    )
 
 
 async def admin_safe_answer(query):
@@ -838,11 +967,16 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
 
     if data in ("refresh_menu", "back_main"):
+        context.user_data.pop("awaiting", None)
         await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu())
         return
 
     if data == "view_orders":
-        await admin_safe_edit_message(query, recent_orders_text(), reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, previous_day_orders_text(), reply_markup=admin_main_menu())
+        return
+
+    if data == "orders_in_progress":
+        await admin_safe_edit_message(query, current_day_orders_text(), reply_markup=admin_main_menu())
         return
 
     if data == "view_stats":
@@ -850,18 +984,35 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data == "export_orders":
-        day_iso = datetime.now(TZ).date().isoformat()
-        file_bytes = build_excel_summary(day_iso)
-        filename = f"orders_{day_iso}.xlsx"
-        if file_bytes[:2] != b"PK":
-            filename = f"orders_{day_iso}.csv"
-
-        await context.bot.send_document(
+        report_day = yesterday_iso()
+        await send_orders_export(
             chat_id=query.message.chat_id,
-            document=InputFile(io.BytesIO(file_bytes), filename=filename),
-            caption=f"Export for {day_iso}",
+            bot=context.bot,
+            report_day_iso=report_day,
         )
-        await admin_safe_edit_message(query, "Export sent.", reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, "Previous-day export sent.", reply_markup=admin_main_menu())
+        return
+
+    if data == "reset_today_orders":
+        context.user_data.pop("awaiting", None)
+        await admin_safe_edit_message(
+            query,
+            "Are you sure you want to reset today's order flow?\nYou will lose all order data stored today.",
+            reply_markup=admin_reset_confirm_menu(),
+        )
+        return
+
+    if data == "confirm_reset_today_orders":
+        deleted_count = delete_orders_for_day(today_iso())
+        await admin_safe_edit_message(
+            query,
+            f"Today's orders were deleted.\nRemoved records: {deleted_count}",
+            reply_markup=admin_main_menu(),
+        )
+        return
+
+    if data == "cancel_reset_today_orders":
+        await admin_safe_edit_message(query, "Reset cancelled.", reply_markup=admin_main_menu())
         return
 
     if data == "message_menu":
@@ -922,25 +1073,33 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if text == "View Orders":
-        await update.message.reply_text(recent_orders_text(), reply_markup=admin_main_menu())
+        await update.message.reply_text(previous_day_orders_text(), reply_markup=admin_main_menu())
+        return
+
+    if text == "Orders in Progress":
+        await update.message.reply_text(current_day_orders_text(), reply_markup=admin_main_menu())
         return
 
     if text == "Export Orders":
-        day_iso = datetime.now(TZ).date().isoformat()
-        file_bytes = build_excel_summary(day_iso)
-        filename = f"orders_{day_iso}.xlsx"
-        if file_bytes[:2] != b"PK":
-            filename = f"orders_{day_iso}.csv"
-
-        await update.message.reply_document(
-            document=InputFile(io.BytesIO(file_bytes), filename=filename),
-            caption=f"Export for {day_iso}",
+        report_day = yesterday_iso()
+        await send_orders_export(
+            chat_id=update.message.chat_id,
+            bot=context.bot,
+            report_day_iso=report_day,
         )
         await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu())
         return
 
     if text == "View Statistics":
         await update.message.reply_text(weekly_stats_text(), reply_markup=admin_main_menu())
+        return
+
+    if text == "Reset Today's Orders":
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(
+            "Are you sure you want to reset today's order flow?\nYou will lose all order data stored today.",
+            reply_markup=admin_reset_confirm_menu(),
+        )
         return
 
     if text == "Message for Technicians":
@@ -1137,12 +1296,13 @@ def admin_export_api():
     if token != ADMIN_ACCESS_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
 
-    day_iso = request.args.get("date") or datetime.now(TZ).date().isoformat()
+    day_iso = request.args.get("date") or yesterday_iso()
     csv_bytes = build_daily_csv_bytes(day_iso)
+    filename = build_export_filename(day_iso, is_excel=False)
     return Response(
         csv_bytes,
         mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=orders_{day_iso}.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
