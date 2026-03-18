@@ -8,6 +8,7 @@ from contextlib import closing
 
 from openpyxl import Workbook
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -330,7 +331,7 @@ def build_excel_summary(day_iso: str) -> bytes:
 # UI
 # ============================================================
 def main_menu():
-    message, active_until = get_active_message_info()
+    message, _ = get_active_message_info()
     msg_status = "Active" if message else "Inactive"
 
     return InlineKeyboardMarkup([
@@ -344,7 +345,7 @@ def main_menu():
 
 
 def message_menu():
-    message, active_until = get_active_message_info()
+    message, _ = get_active_message_info()
 
     rows = []
     if message:
@@ -387,6 +388,30 @@ def message_status_text():
     )
 
 
+async def safe_answer(query):
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        if "Query is too old" in str(exc) or "query id is invalid" in str(exc):
+            logger.warning("Ignored expired callback query.")
+            return
+        raise
+
+
+async def safe_edit_message(query, text, reply_markup=None):
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except BadRequest as exc:
+        message = str(exc)
+        if "Message is not modified" in message:
+            return
+        raise
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Unhandled admin bot error: %s", context.error)
+
+
 # ============================================================
 # HANDLERS
 # ============================================================
@@ -417,25 +442,25 @@ async def authorize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     user = query.from_user
     if not is_admin(user.id):
-        await query.edit_message_text("Unauthorized.")
+        await safe_edit_message(query, "Unauthorized.")
         return
 
     data = query.data
 
     if data == "refresh_menu" or data == "back_main":
-        await query.edit_message_text("Admin bot ready.", reply_markup=main_menu())
+        await safe_edit_message(query, "Admin bot ready.", reply_markup=main_menu())
         return
 
     if data == "view_orders":
-        await query.edit_message_text(recent_orders_text(), reply_markup=main_menu())
+        await safe_edit_message(query, recent_orders_text(), reply_markup=main_menu())
         return
 
     if data == "view_stats":
-        await query.edit_message_text(weekly_stats_text(), reply_markup=main_menu())
+        await safe_edit_message(query, weekly_stats_text(), reply_markup=main_menu())
         return
 
     if data == "export_orders":
@@ -446,11 +471,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             document=InputFile(io.BytesIO(file_bytes), filename=f"orders_{day_iso}.xlsx"),
             caption=f"Excel export for {day_iso}",
         )
-        await query.edit_message_text("Export sent.", reply_markup=main_menu())
+        await safe_edit_message(query, "Export sent.", reply_markup=main_menu())
         return
 
     if data == "message_menu":
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             message_status_text(),
             reply_markup=message_menu(),
         )
@@ -458,7 +484,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "create_message":
         context.user_data["awaiting"] = "technician_message_create"
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "Send the new message for technicians now.\nIt will expire automatically today at 11:59 PM.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
@@ -466,7 +493,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "edit_message":
         context.user_data["awaiting"] = "technician_message_edit"
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "Send the updated message for technicians now.\nIt will expire automatically today at 11:59 PM.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
@@ -475,14 +503,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "delete_message":
         clear_technician_message()
         context.user_data.pop("awaiting", None)
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "Technician message deleted.",
             reply_markup=main_menu(),
         )
         return
 
     if data == "set_limits":
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             "Select the equipment limit to update:",
             reply_markup=limits_menu(),
         )
@@ -492,7 +522,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         setting_key = data.split("::", 1)[1]
         context.user_data["awaiting"] = f"limit::{setting_key}"
         label = SETTABLE_LIMITS.get(setting_key, setting_key)
-        await query.edit_message_text(
+        await safe_edit_message(
+            query,
             f"Send the new value for {label}.\nAllowed range: 0 to 50.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="set_limits")]])
         )
@@ -543,14 +574,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    application = Application.builder().token(ADMIN_BOT_TOKEN).build()
+    application = Application.builder().token(ADMIN_BOT_TOKEN).concurrent_updates(True).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("authorize", authorize_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_error_handler(error_handler)
 
     logger.info("Admin bot started.")
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
