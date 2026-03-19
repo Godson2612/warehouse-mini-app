@@ -33,21 +33,15 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-TECH_BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
-    "8225104783:AAGsMLrMPYHm9lreO54-MiAZfuT0EfuV8IY",
-)
-ADMIN_BOT_TOKEN = os.getenv(
-    "ADMIN_BOT_TOKEN",
-    "8798395520:AAGadGCNtPmgXUv_eUfdQmyfVz57JygDYdc",
-)
+TECH_BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
 BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com").rstrip("/")
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "warehouse-secret-key")
-ADMIN_ACCESS_TOKEN = os.getenv("ADMIN_TOKEN", "481903f396246a735d26ceebbb2a2190")
+ADMIN_ACCESS_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN").strip()
 
 TZ = ZoneInfo(APP_TIMEZONE)
 
@@ -67,7 +61,10 @@ if TECH_BOT_TOKEN:
     tech_bot_app = Application.builder().token(TECH_BOT_TOKEN).build()
 
 if ADMIN_BOT_TOKEN:
-    admin_bot_app = Application.builder().token(ADMIN_BOT_TOKEN).concurrent_updates(True).build()
+    admin_bot_app = Application.builder().token(ADMIN_BOT_TOKEN).build()
+
+_tech_handlers_registered = False
+_admin_handlers_registered = False
 
 # ============================================================
 # DATABASE
@@ -114,7 +111,10 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS admin_users (
     telegram_user_id INTEGER PRIMARY KEY,
-    added_at TEXT NOT NULL
+    telegram_username TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'admin',
+    added_at TEXT NOT NULL,
+    added_by INTEGER
 );
 """
 
@@ -133,6 +133,7 @@ DEFAULT_SETTINGS = {
     "limit_extra_item": "10",
     "technician_message": "",
     "technician_message_active_until": "",
+    "owner_admin_id": "",
 }
 
 EQUIPMENT_LABELS = {
@@ -169,32 +170,69 @@ def get_db():
     return conn
 
 
+def column_exists(conn, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(r["name"] == column_name for r in rows)
+
+
 def init_db():
     with closing(get_db()) as conn:
         conn.executescript(SCHEMA_SQL)
+
+        # Safe migrations for old DBs
+        if not column_exists(conn, "admin_users", "telegram_username"):
+            conn.execute("ALTER TABLE admin_users ADD COLUMN telegram_username TEXT NOT NULL DEFAULT ''")
+        if not column_exists(conn, "admin_users", "role"):
+            conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+        if not column_exists(conn, "admin_users", "added_by"):
+            conn.execute("ALTER TABLE admin_users ADD COLUMN added_by INTEGER")
+
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                 (key, value),
             )
+
+        # Backfill owner if missing and there is already at least one admin
+        owner_id = get_setting_from_conn(conn, "owner_admin_id", "").strip()
+        if not owner_id:
+            oldest_admin = conn.execute(
+                "SELECT telegram_user_id FROM admin_users ORDER BY added_at ASC, telegram_user_id ASC LIMIT 1"
+            ).fetchone()
+            if oldest_admin:
+                owner_id = str(oldest_admin["telegram_user_id"])
+                set_setting_with_conn(conn, "owner_admin_id", owner_id)
+                conn.execute(
+                    "UPDATE admin_users SET role='owner' WHERE telegram_user_id=?",
+                    (int(owner_id),),
+                )
+
         conn.commit()
+
+
+def get_setting_from_conn(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting_with_conn(conn, key: str, value: str):
+    conn.execute(
+        """
+        INSERT INTO settings(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, value),
+    )
 
 
 def get_setting(key: str, default: str = "") -> str:
     with closing(get_db()) as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        return row["value"] if row else default
+        return get_setting_from_conn(conn, key, default)
 
 
 def set_setting(key: str, value: str):
     with closing(get_db()) as conn:
-        conn.execute(
-            """
-            INSERT INTO settings(key, value) VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (key, value),
-        )
+        set_setting_with_conn(conn, key, value)
         conn.commit()
 
 
@@ -215,14 +253,45 @@ def get_limits():
     }
 
 
-def add_admin_user(user_id: int):
+def get_owner_admin_id() -> int | None:
+    raw = get_setting("owner_admin_id", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def is_owner(user_id: int) -> bool:
+    owner_id = get_owner_admin_id()
+    return owner_id == user_id if owner_id is not None else False
+
+
+def add_admin_user(user_id: int, username: str = "", role: str = "admin", added_by: int | None = None):
     now = datetime.now(TZ).isoformat()
     with closing(get_db()) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO admin_users(telegram_user_id, added_at) VALUES(?, ?)",
-            (user_id, now),
+            """
+            INSERT INTO admin_users(telegram_user_id, telegram_username, role, added_at, added_by)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                telegram_username=excluded.telegram_username,
+                role=excluded.role
+            """,
+            (user_id, username or "", role, now, added_by),
         )
+        if role == "owner":
+            set_setting_with_conn(conn, "owner_admin_id", str(user_id))
         conn.commit()
+
+
+def remove_admin_user(user_id: int) -> bool:
+    owner_id = get_owner_admin_id()
+    if owner_id == user_id:
+        return False
+
+    with closing(get_db()) as conn:
+        cur = conn.execute("DELETE FROM admin_users WHERE telegram_user_id=?", (user_id,))
+        conn.commit()
+        return (cur.rowcount or 0) > 0
 
 
 def is_admin(user_id: int) -> bool:
@@ -232,6 +301,18 @@ def is_admin(user_id: int) -> bool:
             (user_id,),
         ).fetchone()
         return row is not None
+
+
+def list_admin_users():
+    with closing(get_db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_user_id, telegram_username, role, added_at, added_by
+            FROM admin_users
+            ORDER BY CASE WHEN role='owner' THEN 0 ELSE 1 END, added_at ASC, telegram_user_id ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def parse_int(value, default=0):
@@ -343,24 +424,28 @@ def save_order(payload: dict):
         conn.commit()
 
 
-def fetch_recent_orders(limit=20):
+def fetch_orders_for_day(day_iso: str):
     with closing(get_db()) as conn:
         rows = conn.execute(
             """
             SELECT * FROM orders
-            ORDER BY created_at DESC
-            LIMIT ?
+            WHERE created_date=?
+            ORDER BY created_at ASC, id ASC
             """,
-            (limit,),
+            (day_iso,),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def fetch_orders_for_day(day_iso: str):
+def fetch_orders_for_day_until(day_iso: str, cutoff_iso: str):
     with closing(get_db()) as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE created_date=? ORDER BY created_at DESC",
-            (day_iso,),
+            """
+            SELECT * FROM orders
+            WHERE created_date=? AND created_at<=?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (day_iso, cutoff_iso),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -368,25 +453,47 @@ def fetch_orders_for_day(day_iso: str):
 def fetch_orders_since(start_date_iso: str):
     with closing(get_db()) as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE created_date>=? ORDER BY created_at DESC",
+            "SELECT * FROM orders WHERE created_date>=? ORDER BY created_at DESC, id DESC",
             (start_date_iso,),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def delete_orders_for_day(day_iso: str) -> int:
+def enumerate_daily_orders(rows: list[dict]) -> list[dict]:
+    numbered = []
+    for index, row in enumerate(rows, start=1):
+        item = dict(row)
+        item["daily_number"] = index
+        numbered.append(item)
+    return numbered
+
+
+def delete_orders_by_ids(order_ids: list[int]) -> int:
+    if not order_ids:
+        return 0
+
+    placeholders = ",".join(["?"] * len(order_ids))
     with closing(get_db()) as conn:
-        cur = conn.execute("DELETE FROM orders WHERE created_date=?", (day_iso,))
+        cur = conn.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", tuple(order_ids))
         conn.commit()
         return cur.rowcount or 0
 
 
-def build_daily_csv_bytes(day_iso: str) -> bytes:
-    orders = fetch_orders_for_day(day_iso)
+def get_order_by_daily_number(day_iso: str, daily_number: int) -> dict | None:
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso))
+    for row in rows:
+        if row["daily_number"] == daily_number:
+            return row
+    return None
+
+
+def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
+        "daily_number",
         "created_at",
+        "created_date",
         "telegram_user_id",
         "telegram_username",
         "tech_id",
@@ -411,9 +518,12 @@ def build_daily_csv_bytes(day_iso: str) -> bytes:
         "extra_item_qty",
         "notes",
     ])
-    for row in orders:
+    numbered_rows = enumerate_daily_orders(rows)
+    for row in numbered_rows:
         writer.writerow([
+            row["daily_number"],
             row["created_at"],
+            row["created_date"],
             row["telegram_user_id"],
             row["telegram_username"],
             row["tech_id"],
@@ -524,9 +634,11 @@ async def tech_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def register_tech_handlers():
-    if tech_bot_app is None:
+    global _tech_handlers_registered
+    if tech_bot_app is None or _tech_handlers_registered:
         return
     tech_bot_app.add_handler(CommandHandler("start", tech_start_command))
+    _tech_handlers_registered = True
 
 
 def run_tech_bot():
@@ -574,15 +686,6 @@ def equipment_totals(rows):
     return totals
 
 
-def format_totals_compact(totals: dict) -> str:
-    parts = []
-    for key in EQUIPMENT_ORDER:
-        value = int(totals.get(key, 0) or 0)
-        if value > 0:
-            parts.append(f"{EQUIPMENT_LABELS[key]} {value}")
-    return " | ".join(parts) if parts else "No equipment requested"
-
-
 def format_totals_multiline(totals: dict) -> str:
     lines = []
     for key in EQUIPMENT_ORDER:
@@ -602,8 +705,8 @@ def admin_home_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton("Home"), KeyboardButton("View Orders")],
-            [KeyboardButton("Orders in Progress"), KeyboardButton("Export Orders")],
-            [KeyboardButton("View Statistics"), KeyboardButton("Reset Today's Orders")],
+            [KeyboardButton("Delete Order"), KeyboardButton("Export Orders")],
+            [KeyboardButton("View Statistics"), KeyboardButton("Manage Admins")],
             [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
         ],
         resize_keyboard=True,
@@ -612,20 +715,24 @@ def admin_home_keyboard():
     )
 
 
-def admin_main_menu():
+def admin_main_menu(user_id: int):
     message, _ = get_active_message_info()
     msg_status = "Active" if message else "Inactive"
 
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("View Orders", callback_data="view_orders")],
-        [InlineKeyboardButton("Orders in Progress", callback_data="orders_in_progress")],
-        [InlineKeyboardButton("Export Orders", callback_data="export_orders")],
+        [InlineKeyboardButton("Delete Order", callback_data="delete_order_prompt")],
+        [InlineKeyboardButton("Export Orders", callback_data="export_orders_menu")],
         [InlineKeyboardButton("View Statistics", callback_data="view_stats")],
-        [InlineKeyboardButton("Reset Today's Orders", callback_data="reset_today_orders")],
         [InlineKeyboardButton(f"Message for Technicians ({msg_status})", callback_data="message_menu")],
         [InlineKeyboardButton("Set Max Equipment", callback_data="set_limits")],
-        [InlineKeyboardButton("Refresh", callback_data="refresh_menu")],
-    ])
+    ]
+
+    if is_owner(user_id):
+        rows.append([InlineKeyboardButton("Manage Admins", callback_data="manage_admins")])
+
+    rows.append([InlineKeyboardButton("Refresh", callback_data="refresh_menu")])
+    return InlineKeyboardMarkup(rows)
 
 
 def admin_message_menu():
@@ -658,10 +765,20 @@ def admin_limits_menu():
     return InlineKeyboardMarkup(rows)
 
 
-def admin_reset_confirm_menu():
+def export_orders_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Yes, Continue", callback_data="confirm_reset_today_orders")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel_reset_today_orders")],
+        [InlineKeyboardButton("Export and Keep Orders", callback_data="export_keep")],
+        [InlineKeyboardButton("Export and Delete Exported Orders", callback_data="export_delete")],
+        [InlineKeyboardButton("Back", callback_data="back_main")],
+    ])
+
+
+def manage_admins_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("List Admins", callback_data="list_admins")],
+        [InlineKeyboardButton("Add Admin", callback_data="add_admin_prompt")],
+        [InlineKeyboardButton("Remove Admin", callback_data="remove_admin_prompt")],
+        [InlineKeyboardButton("Back", callback_data="back_main")],
     ])
 
 
@@ -719,7 +836,7 @@ def weekly_stats_text():
 
 
 def orders_text_for_day(day_iso: str, title: str):
-    rows = fetch_orders_for_day(day_iso)
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso))
     if not rows:
         return f"{title}\nDate: {day_iso}\n\nNo orders found."
 
@@ -749,49 +866,58 @@ def orders_text_for_day(day_iso: str, title: str):
             items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
 
         item_text = ", ".join(items) if items else "No items"
-        created_display = row["created_at"][11:19] if row.get("created_at") else "N/A"
+        created_display = "N/A"
+        if row.get("created_at"):
+            created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
         lines.append(
-            f"- {created_display} | Tech ID {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
         )
 
     return "\n".join(lines)
 
 
-def previous_day_orders_text():
-    return orders_text_for_day(
-        yesterday_iso(),
-        "📦 View Orders",
-    )
-
-
 def current_day_orders_text():
-    return orders_text_for_day(
-        today_iso(),
-        "📦 Orders in Progress",
-    )
+    return orders_text_for_day(today_iso(), "📦 Today's Orders")
 
 
-def build_excel_summary(day_iso: str) -> bytes:
-    rows = fetch_orders_for_day(day_iso)
+def list_admins_text():
+    rows = list_admin_users()
+    if not rows:
+        return "No admins configured."
+
+    lines = ["👮 Admin Users", ""]
+    for row in rows:
+        username = f"@{row['telegram_username']}" if row.get("telegram_username") else "(no username)"
+        lines.append(
+            f"- {row['role'].upper()} | ID {row['telegram_user_id']} | {username}"
+        )
+    lines.append("")
+    lines.append("Tip: any user can send /myid to the bot to see their Telegram ID.")
+    return "\n".join(lines)
+
+
+def build_excel_summary_from_rows(report_day_iso: str, rows: list[dict]) -> bytes:
     output = io.BytesIO()
+    numbered_rows = enumerate_daily_orders(rows)
 
     try:
         from openpyxl import Workbook
     except Exception:
-        csv_bytes = build_daily_csv_bytes(day_iso)
+        csv_bytes = build_csv_bytes_from_rows(rows)
         output.write(csv_bytes)
         output.seek(0)
         return output.getvalue()
 
     wb = Workbook()
 
-    totals = equipment_totals(rows)
+    totals = equipment_totals(numbered_rows)
 
     ws_overview = wb.active
     ws_overview.title = "Overview"
-    ws_overview.append(["Report Date", day_iso])
+    ws_overview.append(["Report Date", report_day_iso])
     ws_overview.append(["Exported At", now_local().strftime("%Y-%m-%d %I:%M:%S %p")])
-    ws_overview.append(["Total Orders", len(rows)])
+    ws_overview.append(["Total Orders", len(numbered_rows)])
     ws_overview.append([])
     ws_overview.append(["Equipment", "Total Qty"])
     for key in EQUIPMENT_ORDER:
@@ -809,7 +935,7 @@ def build_excel_summary(day_iso: str) -> bytes:
     ])
 
     grouped = {}
-    for row in rows:
+    for row in numbered_rows:
         key = (row["tech_id"], row["bp_number"])
         if key not in grouped:
             grouped[key] = {
@@ -846,6 +972,7 @@ def build_excel_summary(day_iso: str) -> bytes:
 
     ws_raw = wb.create_sheet("Raw Orders")
     ws_raw.append([
+        "daily_number",
         "created_at",
         "tech_id",
         "bp_number",
@@ -854,8 +981,9 @@ def build_excel_summary(day_iso: str) -> bytes:
         "xer10", "onu", "screen", "battery", "sensor", "camera",
         "extra_item_name", "extra_item_qty", "notes"
     ])
-    for row in rows:
+    for row in numbered_rows:
         ws_raw.append([
+            row["daily_number"],
             row["created_at"],
             row["tech_id"],
             row["bp_number"],
@@ -870,10 +998,9 @@ def build_excel_summary(day_iso: str) -> bytes:
     return output.getvalue()
 
 
-async def send_orders_export(chat_id: int, bot, report_day_iso: str):
-    rows = fetch_orders_for_day(report_day_iso)
+async def send_orders_export(chat_id: int, bot, report_day_iso: str, rows: list[dict], delete_after_export: bool):
     totals = equipment_totals(rows)
-    file_bytes = build_excel_summary(report_day_iso)
+    file_bytes = build_excel_summary_from_rows(report_day_iso, rows)
     is_excel = file_bytes[:2] == b"PK"
     filename = build_export_filename(report_day_iso, is_excel=is_excel)
 
@@ -883,6 +1010,8 @@ async def send_orders_export(chat_id: int, bot, report_day_iso: str):
         "",
         "Equipment totals:",
         format_totals_multiline(totals),
+        "",
+        f"Mode: {'Export and Delete Exported Orders' if delete_after_export else 'Export and Keep Orders'}",
     ]
 
     await bot.send_document(
@@ -890,6 +1019,33 @@ async def send_orders_export(chat_id: int, bot, report_day_iso: str):
         document=InputFile(io.BytesIO(file_bytes), filename=filename),
         caption="\n".join(caption_lines),
     )
+
+
+async def run_export_action(chat_id: int, bot, delete_after_export: bool):
+    report_day = today_iso()
+    cutoff_iso = now_local().isoformat()
+    rows = fetch_orders_for_day_until(report_day, cutoff_iso)
+
+    if not rows:
+        await bot.send_message(chat_id=chat_id, text=f"No orders found for {report_day}.")
+        return
+
+    await send_orders_export(
+        chat_id=chat_id,
+        bot=bot,
+        report_day_iso=report_day,
+        rows=rows,
+        delete_after_export=delete_after_export,
+    )
+
+    if delete_after_export:
+        deleted_count = delete_orders_by_ids([int(r["id"]) for r in rows])
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Export completed.\nDeleted exported orders: {deleted_count}\nNew orders created after export remained active.",
+        )
+    else:
+        await bot.send_message(chat_id=chat_id, text="Export completed. Orders were kept.")
 
 
 async def admin_safe_answer(query):
@@ -918,19 +1074,35 @@ async def admin_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE
 async def admin_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_admin(user.id):
+        add_admin_user(user.id, user.username or "", "owner" if is_owner(user.id) else "admin", None)
         await update.message.reply_text(
             "Admin bot ready.",
             reply_markup=admin_home_keyboard(),
         )
         await update.message.reply_text(
             "Select an option below.",
-            reply_markup=admin_main_menu(),
+            reply_markup=admin_main_menu(user.id),
         )
         return
 
+    owner_id = get_owner_admin_id()
+    if owner_id is None:
+        text = "Admin authorization required.\nUse:\n/authorize YOUR_ADMIN_TOKEN"
+    else:
+        text = (
+            "This bot is restricted.\n"
+            "Ask the owner to add you as admin.\n\n"
+            "You can send /myid to share your Telegram ID."
+        )
+
+    await update.message.reply_text(text, reply_markup=admin_home_keyboard())
+
+
+async def admin_myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    username = f"@{user.username}" if user.username else "(no username)"
     await update.message.reply_text(
-        "Admin authorization required.\nUse:\n/authorize YOUR_ADMIN_TOKEN",
-        reply_markup=admin_home_keyboard(),
+        f"Your Telegram ID is:\n{user.id}\n\nUsername: {username}"
     )
 
 
@@ -944,14 +1116,33 @@ async def admin_authorize_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     user = update.effective_user
-    add_admin_user(user.id)
+    owner_id = get_owner_admin_id()
+
+    if owner_id is None:
+        add_admin_user(user.id, user.username or "", role="owner", added_by=user.id)
+        await update.message.reply_text(
+            "Owner admin access granted.",
+            reply_markup=admin_home_keyboard(),
+        )
+        await update.message.reply_text(
+            "Select an option below.",
+            reply_markup=admin_main_menu(user.id),
+        )
+        return
+
+    if is_admin(user.id):
+        await update.message.reply_text(
+            "Admin access already active.",
+            reply_markup=admin_home_keyboard(),
+        )
+        await update.message.reply_text(
+            "Select an option below.",
+            reply_markup=admin_main_menu(user.id),
+        )
+        return
+
     await update.message.reply_text(
-        "Admin access granted.",
-        reply_markup=admin_home_keyboard(),
-    )
-    await update.message.reply_text(
-        "Select an option below.",
-        reply_markup=admin_main_menu(),
+        "Direct token authorization is disabled after owner setup.\nAsk the owner to add you from Manage Admins.\n\nUse /myid to get your Telegram ID."
     )
 
 
@@ -968,51 +1159,43 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data in ("refresh_menu", "back_main"):
         context.user_data.pop("awaiting", None)
-        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
         return
 
     if data == "view_orders":
-        await admin_safe_edit_message(query, previous_day_orders_text(), reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, current_day_orders_text(), reply_markup=admin_main_menu(user.id))
         return
 
-    if data == "orders_in_progress":
-        await admin_safe_edit_message(query, current_day_orders_text(), reply_markup=admin_main_menu())
+    if data == "delete_order_prompt":
+        context.user_data["awaiting"] = "delete_order_number"
+        await admin_safe_edit_message(
+            query,
+            "Send the daily order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_main")]])
+        )
         return
 
     if data == "view_stats":
-        await admin_safe_edit_message(query, weekly_stats_text(), reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, weekly_stats_text(), reply_markup=admin_main_menu(user.id))
         return
 
-    if data == "export_orders":
-        report_day = yesterday_iso()
-        await send_orders_export(
-            chat_id=query.message.chat_id,
-            bot=context.bot,
-            report_day_iso=report_day,
-        )
-        await admin_safe_edit_message(query, "Previous-day export sent.", reply_markup=admin_main_menu())
-        return
-
-    if data == "reset_today_orders":
+    if data == "export_orders_menu":
         context.user_data.pop("awaiting", None)
         await admin_safe_edit_message(
             query,
-            "Are you sure you want to reset today's order flow?\nYou will lose all order data stored today.",
-            reply_markup=admin_reset_confirm_menu(),
+            "Choose how to export today's orders.",
+            reply_markup=export_orders_menu(),
         )
         return
 
-    if data == "confirm_reset_today_orders":
-        deleted_count = delete_orders_for_day(today_iso())
-        await admin_safe_edit_message(
-            query,
-            f"Today's orders were deleted.\nRemoved records: {deleted_count}",
-            reply_markup=admin_main_menu(),
-        )
+    if data == "export_keep":
+        await run_export_action(query.message.chat_id, context.bot, delete_after_export=False)
+        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
         return
 
-    if data == "cancel_reset_today_orders":
-        await admin_safe_edit_message(query, "Reset cancelled.", reply_markup=admin_main_menu())
+    if data == "export_delete":
+        await run_export_action(query.message.chat_id, context.bot, delete_after_export=True)
+        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
         return
 
     if data == "message_menu":
@@ -1040,7 +1223,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "delete_message":
         clear_technician_message()
         context.user_data.pop("awaiting", None)
-        await admin_safe_edit_message(query, "Technician message deleted.", reply_markup=admin_main_menu())
+        await admin_safe_edit_message(query, "Technician message deleted.", reply_markup=admin_main_menu(user.id))
         return
 
     if data == "set_limits":
@@ -1058,60 +1241,108 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
+    if data == "manage_admins":
+        if not is_owner(user.id):
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+        context.user_data.pop("awaiting", None)
+        await admin_safe_edit_message(query, "Admin management", reply_markup=manage_admins_menu())
+        return
+
+    if data == "list_admins":
+        if not is_owner(user.id):
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+        await admin_safe_edit_message(query, list_admins_text(), reply_markup=manage_admins_menu())
+        return
+
+    if data == "add_admin_prompt":
+        if not is_owner(user.id):
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+        context.user_data["awaiting"] = "add_admin_id"
+        await admin_safe_edit_message(
+            query,
+            "Send the Telegram ID of the user to add as admin.\n\nTip: the user can send /myid to this bot and share the number with you.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="manage_admins")]])
+        )
+        return
+
+    if data == "remove_admin_prompt":
+        if not is_owner(user.id):
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+        context.user_data["awaiting"] = "remove_admin_id"
+        await admin_safe_edit_message(
+            query,
+            "Send the Telegram ID of the admin to remove.\nThe owner cannot be removed.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="manage_admins")]])
+        )
+        return
+
 
 async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    text = (update.message.text or "").strip()
+
     if not is_admin(user.id):
+        if text.lower() in {"home", "view orders", "delete order", "export orders", "view statistics", "manage admins", "message for technicians", "set max equipment"}:
+            await update.message.reply_text("Unauthorized.")
         return
 
-    text = (update.message.text or "").strip()
     awaiting = context.user_data.get("awaiting")
 
     if text == "Home":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu())
+        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu(user.id))
         return
 
     if text == "View Orders":
-        await update.message.reply_text(previous_day_orders_text(), reply_markup=admin_main_menu())
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(current_day_orders_text(), reply_markup=admin_main_menu(user.id))
         return
 
-    if text == "Orders in Progress":
-        await update.message.reply_text(current_day_orders_text(), reply_markup=admin_main_menu())
+    if text == "Delete Order":
+        context.user_data["awaiting"] = "delete_order_number"
+        await update.message.reply_text(
+            "Send the daily order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            reply_markup=admin_main_menu(user.id),
+        )
         return
 
     if text == "Export Orders":
-        report_day = yesterday_iso()
-        await send_orders_export(
-            chat_id=update.message.chat_id,
-            bot=context.bot,
-            report_day_iso=report_day,
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(
+            "Choose how to export today's orders.",
+            reply_markup=export_orders_menu(),
         )
-        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu())
         return
 
     if text == "View Statistics":
-        await update.message.reply_text(weekly_stats_text(), reply_markup=admin_main_menu())
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(weekly_stats_text(), reply_markup=admin_main_menu(user.id))
         return
 
-    if text == "Reset Today's Orders":
+    if text == "Manage Admins":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text(
-            "Are you sure you want to reset today's order flow?\nYou will lose all order data stored today.",
-            reply_markup=admin_reset_confirm_menu(),
-        )
+        if not is_owner(user.id):
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+        await update.message.reply_text("Admin management", reply_markup=manage_admins_menu())
         return
 
     if text == "Message for Technicians":
+        context.user_data.pop("awaiting", None)
         await update.message.reply_text(admin_message_status_text(), reply_markup=admin_message_menu())
         return
 
     if text == "Set Max Equipment":
+        context.user_data.pop("awaiting", None)
         await update.message.reply_text("Select the equipment limit to update:", reply_markup=admin_limits_menu())
         return
 
     if not awaiting:
-        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu())
+        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu(user.id))
         return
 
     if awaiting in ("technician_message_create", "technician_message_edit"):
@@ -1121,7 +1352,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         expires = datetime.fromisoformat(active_until).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
         await update.message.reply_text(
             f"Technician message saved.\nActive until: {expires}",
-            reply_markup=admin_main_menu(),
+            reply_markup=admin_main_menu(user.id),
         )
         return
 
@@ -1140,27 +1371,108 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         label = SETTABLE_LIMITS.get(setting_key, setting_key)
         await update.message.reply_text(
             f"{label} updated to {value}.",
-            reply_markup=admin_main_menu(),
+            reply_markup=admin_main_menu(user.id),
         )
+        return
+
+    if awaiting == "delete_order_number":
+        try:
+            daily_number = int(text)
+            if daily_number <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("Enter a valid daily order number like 1, 2, or 3.")
+            return
+
+        row = get_order_by_daily_number(today_iso(), daily_number)
+        if not row:
+            await update.message.reply_text("That order number was not found for today.")
+            return
+
+        deleted_count = delete_orders_by_ids([int(row["id"])])
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(
+            f"Order #{daily_number} deleted.\nRemoved records: {deleted_count}",
+            reply_markup=admin_main_menu(user.id),
+        )
+        return
+
+    if awaiting == "add_admin_id":
+        if not is_owner(user.id):
+            context.user_data.pop("awaiting", None)
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+
+        try:
+            target_id = int(text)
+            if target_id <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("Send a valid numeric Telegram ID.")
+            return
+
+        add_admin_user(target_id, "", role="admin", added_by=user.id)
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(
+            f"Admin added successfully.\nTelegram ID: {target_id}",
+            reply_markup=manage_admins_menu(),
+        )
+        return
+
+    if awaiting == "remove_admin_id":
+        if not is_owner(user.id):
+            context.user_data.pop("awaiting", None)
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            return
+
+        try:
+            target_id = int(text)
+            if target_id <= 0:
+                raise ValueError
+        except Exception:
+            await update.message.reply_text("Send a valid numeric Telegram ID.")
+            return
+
+        if is_owner(target_id):
+            await update.message.reply_text("The owner cannot be removed.")
+            return
+
+        removed = remove_admin_user(target_id)
+        context.user_data.pop("awaiting", None)
+        if removed:
+            await update.message.reply_text(
+                f"Admin removed successfully.\nTelegram ID: {target_id}",
+                reply_markup=manage_admins_menu(),
+            )
+        else:
+            await update.message.reply_text(
+                "That Telegram ID is not currently an admin.",
+                reply_markup=manage_admins_menu(),
+            )
         return
 
 
 async def admin_post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Open admin menu"),
-        BotCommand("authorize", "Authorize admin access"),
+        BotCommand("authorize", "Authorize owner setup"),
+        BotCommand("myid", "Show your Telegram ID"),
     ])
 
 
 def register_admin_handlers():
-    if admin_bot_app is None:
+    global _admin_handlers_registered
+    if admin_bot_app is None or _admin_handlers_registered:
         return
+
     admin_bot_app.post_init = admin_post_init
     admin_bot_app.add_handler(CommandHandler("start", admin_start_command))
     admin_bot_app.add_handler(CommandHandler("authorize", admin_authorize_command))
+    admin_bot_app.add_handler(CommandHandler("myid", admin_myid_command))
     admin_bot_app.add_handler(CallbackQueryHandler(admin_callback_handler))
     admin_bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
     admin_bot_app.add_error_handler(admin_error_handler)
+    _admin_handlers_registered = True
 
 
 def run_admin_bot():
@@ -1297,13 +1609,30 @@ def admin_export_api():
         return jsonify({"error": "Unauthorized"}), 401
 
     day_iso = request.args.get("date") or yesterday_iso()
-    csv_bytes = build_daily_csv_bytes(day_iso)
+    rows = fetch_orders_for_day(day_iso)
+    csv_bytes = build_csv_bytes_from_rows(rows)
     filename = build_export_filename(day_iso, is_excel=False)
     return Response(
         csv_bytes,
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+@app.get("/admin/export/check")
+def admin_export_check():
+    token = request.args.get("token", "")
+    if token != ADMIN_ACCESS_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    day_iso = request.args.get("date") or yesterday_iso()
+    rows = fetch_orders_for_day(day_iso)
+    return jsonify({
+        "ok": True,
+        "date": day_iso,
+        "orders_found": len(rows),
+        "generated_at": now_local().isoformat(),
+    })
 
 
 # ============================================================
@@ -1324,11 +1653,11 @@ def ensure_app_started():
         init_db()
 
         if tech_bot_app is not None:
-            tech_thread = threading.Thread(target=run_tech_bot, daemon=True)
+            tech_thread = threading.Thread(target=run_tech_bot, daemon=True, name="tech-bot-thread")
             tech_thread.start()
 
         if admin_bot_app is not None:
-            admin_thread = threading.Thread(target=run_admin_bot, daemon=True)
+            admin_thread = threading.Thread(target=run_admin_bot, daemon=True, name="admin-bot-thread")
             admin_thread.start()
 
         _started = True
