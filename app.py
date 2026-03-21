@@ -189,7 +189,6 @@ def init_db():
     with closing(get_db()) as conn:
         conn.executescript(SCHEMA_SQL)
 
-        # Safe migrations for old DBs
         if not column_exists(conn, "admin_users", "telegram_username"):
             conn.execute("ALTER TABLE admin_users ADD COLUMN telegram_username TEXT NOT NULL DEFAULT ''")
         if not column_exists(conn, "admin_users", "role"):
@@ -208,7 +207,6 @@ def init_db():
                 (key, value),
             )
 
-        # Backfill owner if missing and there is already at least one admin
         owner_id = get_setting_from_conn(conn, "owner_admin_id", "").strip()
         if not owner_id:
             oldest_admin = conn.execute(
@@ -924,9 +922,8 @@ def admin_home_keyboard():
         [KeyboardButton("Order History"), KeyboardButton("Delete Order")],
         [KeyboardButton("Export Orders"), KeyboardButton("View Statistics")],
         [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
+        [KeyboardButton("Manage Admins")],
     ]
-
-    rows.append([KeyboardButton("Manage Admins")])
 
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -1334,6 +1331,16 @@ async def admin_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE
 
 async def admin_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    owner_id = get_owner_admin_id()
+
+    if owner_id is None:
+        add_admin_user(user.id, user.username or "", role="owner", added_by=user.id)
+        await update.message.reply_text(
+            "Owner admin access granted automatically.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+
     if is_admin(user.id):
         add_admin_user(user.id, user.username or "", "owner" if is_owner(user.id) else "admin", None)
         await update.message.reply_text(
@@ -1342,17 +1349,12 @@ async def admin_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    owner_id = get_owner_admin_id()
-    if owner_id is None:
-        text = "Admin authorization required.\nUse:\n/authorize YOUR_ADMIN_TOKEN"
-    else:
-        text = (
-            "This bot is restricted.\n"
-            "Ask the owner to add you as admin.\n\n"
-            "You can send /myid to share your Telegram ID."
-        )
-
-    await update.message.reply_text(text, reply_markup=admin_home_keyboard())
+    await update.message.reply_text(
+        "This bot is restricted.\n"
+        "Ask the owner to add you as admin.\n\n"
+        "You can send /myid to share your Telegram ID.",
+        reply_markup=admin_home_keyboard(),
+    )
 
 
 async def admin_myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1364,24 +1366,7 @@ async def admin_myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def admin_authorize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Use: /authorize YOUR_ADMIN_TOKEN")
-        return
-
-    if context.args[0] != ADMIN_ACCESS_TOKEN:
-        await update.message.reply_text("Invalid admin token.")
-        return
-
     user = update.effective_user
-    owner_id = get_owner_admin_id()
-
-    if owner_id is None:
-        add_admin_user(user.id, user.username or "", role="owner", added_by=user.id)
-        await update.message.reply_text(
-            "Owner admin access granted.",
-            reply_markup=admin_home_keyboard(),
-        )
-        return
 
     if is_admin(user.id):
         await update.message.reply_text(
@@ -1391,7 +1376,9 @@ async def admin_authorize_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await update.message.reply_text(
-        "Direct token authorization is disabled after owner setup.\nAsk the owner to add you from Manage Admins.\n\nUse /myid to get your Telegram ID."
+        "Manual token authorization is disabled.\n"
+        "Ask the owner to add you from Manage Admins.\n\n"
+        "Use /myid to get your Telegram ID."
     )
 
 
@@ -1717,7 +1704,6 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def admin_post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Open admin menu"),
-        BotCommand("authorize", "Authorize owner setup"),
         BotCommand("myid", "Show your Telegram ID"),
     ])
 
@@ -1922,10 +1908,6 @@ def admin_export_api():
 
 @app.get("/admin/export/check")
 def admin_export_check():
-    token = request.args.get("token", "")
-    if token != ADMIN_ACCESS_TOKEN:
-        return jsonify({"error": "Unauthorized"}), 401
-
     day_iso = request.args.get("date") or yesterday_iso()
     rows = fetch_orders_for_day(day_iso, status="active")
     return jsonify({
