@@ -12,10 +12,9 @@ jobs:
       - name: Trigger export endpoint
         env:
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
-          EXPORT_ENDPOINT_TOKEN: ${{ secrets.EXPORT_ENDPOINT_TOKEN }}
         run: |
           curl --fail --silent --show-error \
             --max-time 120 \
             --retry 3 \
             --retry-delay 20 \
-            "${APP_BASE_URL}/admin/export/check?token=${EXPORT_ENDPOINT_TOKEN}"
+            "${APP_BASE_URL}/admin/export/check"
