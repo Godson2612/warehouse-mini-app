@@ -52,8 +52,18 @@
       </div>
 
       <form id="requestForm" action="{{ url_for('create_order') }}" method="post" novalidate>
-        <input type="hidden" name="telegram_user_id" id="telegram_user_id" value="">
-        <input type="hidden" name="telegram_username" id="telegram_username" value="">
+        <input
+          type="hidden"
+          name="telegram_user_id"
+          id="telegram_user_id"
+          value="{{ form_data.telegram_user_id if form_data else (prefill.telegram_user_id if prefill else '') }}"
+        >
+        <input
+          type="hidden"
+          name="telegram_username"
+          id="telegram_username"
+          value="{{ form_data.telegram_username if form_data else (prefill.telegram_username if prefill else '') }}"
+        >
 
         <div class="form-section">
           <label for="tech_id">Tech ID</label>

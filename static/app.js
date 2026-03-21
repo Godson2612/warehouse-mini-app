@@ -108,15 +108,25 @@
   }
 
   function fillTelegramUserData() {
-    if (!tg) return;
-    const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
-    if (!user) return;
-
     const telegramUserId = byId("telegram_user_id");
     const telegramUsername = byId("telegram_username");
 
-    if (telegramUserId) telegramUserId.value = user.id || "";
-    if (telegramUsername) telegramUsername.value = user.username || "";
+    if (tg) {
+      const user = tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+      if (user) {
+        if (telegramUserId) telegramUserId.value = user.id || "";
+        if (telegramUsername) telegramUsername.value = user.username || "";
+        return;
+      }
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (telegramUserId && !telegramUserId.value) {
+      telegramUserId.value = params.get("uid") || "";
+    }
+    if (telegramUsername && !telegramUsername.value) {
+      telegramUsername.value = params.get("username") || "";
+    }
   }
 
   function setBodyLocked(locked) {
@@ -174,8 +184,8 @@
   }
 
   function refreshAllButtons() {
-    ["xb3","xb6","xb7","xb8","xb10"].forEach(id => syncButtonsForInput(id, 999, "modems"));
-    ["xg1","xg1_4k"].forEach(id => syncButtonsForInput(id, 999, "dvr"));
+    ["xb3", "xb6", "xb7", "xb8", "xb10"].forEach(id => syncButtonsForInput(id, 999, "modems"));
+    ["xg1", "xg1_4k"].forEach(id => syncButtonsForInput(id, 999, "dvr"));
 
     syncButtonsForInput("xg2", window.APP_LIMITS.xg2);
     syncButtonsForInput("xid", window.APP_LIMITS.xid);
@@ -279,9 +289,7 @@
     pairs.forEach(([id, max, group]) => {
       const input = byId(id);
       if (!input) return;
-
       input.addEventListener("input", () => validateManualInput(id, max, group));
-      input.addEventListener("focus", () => {});
     });
 
     const bpInput = byId("bp_number");
@@ -310,7 +318,29 @@
     const form = byId("requestForm");
     if (!form) return;
 
+    form.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+
+      const tag = (event.target && event.target.tagName ? event.target.tagName : "").toUpperCase();
+      if (tag === "TEXTAREA") return;
+
+      event.preventDefault();
+
+      if (event.target && event.target.id === "tech_id") {
+        hideKeyboard();
+        byId("bp_number")?.focus();
+        return;
+      }
+
+      hideKeyboard();
+    });
+
     form.addEventListener("submit", (event) => {
+      if (form.dataset.submitting === "true") {
+        event.preventDefault();
+        return;
+      }
+
       hideKeyboard();
 
       const techId = (byId("tech_id")?.value || "").trim();
@@ -359,6 +389,8 @@
         haptic("error");
         return;
       }
+
+      form.dataset.submitting = "true";
 
       const submitBtn = byId("submitBtn");
       if (submitBtn) {

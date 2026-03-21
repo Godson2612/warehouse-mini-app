@@ -1,6 +1,7 @@
 import os
 import io
 import csv
+import re
 import sqlite3
 import logging
 import threading
@@ -101,7 +102,9 @@ CREATE TABLE IF NOT EXISTS orders (
     extra_item_name TEXT NOT NULL DEFAULT '',
     extra_item_qty INTEGER NOT NULL DEFAULT 0,
 
-    notes TEXT NOT NULL DEFAULT ''
+    notes TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    exported_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -163,6 +166,13 @@ EQUIPMENT_ORDER = [
     "extra_item_qty",
 ]
 
+MERGE_SUM_FIELDS = [
+    "xb3", "xb6", "xb7", "xb8", "xb10",
+    "xg1", "xg1_4k", "xg2", "xid", "xi6",
+    "xer10", "onu", "screen", "battery", "sensor", "camera",
+    "extra_item_qty",
+]
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -186,6 +196,11 @@ def init_db():
             conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
         if not column_exists(conn, "admin_users", "added_by"):
             conn.execute("ALTER TABLE admin_users ADD COLUMN added_by INTEGER")
+
+        if not column_exists(conn, "orders", "status"):
+            conn.execute("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        if not column_exists(conn, "orders", "exported_at"):
+            conn.execute("ALTER TABLE orders ADD COLUMN exported_at TEXT NOT NULL DEFAULT ''")
 
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
@@ -379,6 +394,75 @@ def clear_technician_message():
     set_setting("technician_message_active_until", "")
 
 
+def normalize_basic_key(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+    return cleaned
+
+
+def normalize_tech_id(value: str) -> str:
+    return normalize_basic_key(value)
+
+
+def normalize_bp_number(value: str) -> str:
+    cleaned = normalize_basic_key(value)
+    if cleaned.startswith("bp") and len(cleaned) > 2:
+        cleaned = cleaned[2:]
+    return cleaned
+
+
+def combine_extra_item_names(existing_name: str, new_name: str) -> str:
+    left = (existing_name or "").strip()
+    right = (new_name or "").strip()
+
+    if not left:
+        return right
+    if not right:
+        return left
+
+    if normalize_basic_key(left) == normalize_basic_key(right):
+        return left
+
+    return f"{left} | {right}"
+
+
+def combine_notes(existing_notes: str, new_notes: str) -> str:
+    left = (existing_notes or "").strip()
+    right = (new_notes or "").strip()
+
+    if not left:
+        return right
+    if not right:
+        return left
+    if left == right:
+        return left
+
+    return f"{left}\n{right}"
+
+
+def merge_payload_with_existing(existing_row: dict, payload: dict) -> dict:
+    merged = dict(payload)
+
+    merged["telegram_user_id"] = payload.get("telegram_user_id") or existing_row.get("telegram_user_id")
+    merged["telegram_username"] = (payload.get("telegram_username") or "").strip() or (existing_row.get("telegram_username") or "").strip()
+
+    merged["tech_id"] = (existing_row.get("tech_id") or payload.get("tech_id") or "").strip()
+    merged["bp_number"] = (existing_row.get("bp_number") or payload.get("bp_number") or "").strip()
+
+    for field in MERGE_SUM_FIELDS:
+        merged[field] = int(existing_row.get(field, 0) or 0) + int(payload.get(field, 0) or 0)
+
+    merged["extra_item_name"] = combine_extra_item_names(
+        existing_row.get("extra_item_name", ""),
+        payload.get("extra_item_name", ""),
+    )
+    merged["notes"] = combine_notes(
+        existing_row.get("notes", ""),
+        payload.get("notes", ""),
+    )
+
+    return merged
+
+
 def save_order(payload: dict):
     now = now_local()
     with closing(get_db()) as conn:
@@ -390,8 +474,8 @@ def save_order(payload: dict):
                 xb3, xb6, xb7, xb8, xb10,
                 xg1, xg1_4k, xg2, xid, xi6, xer10, onu,
                 screen, battery, sensor, camera,
-                extra_item_name, extra_item_qty, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extra_item_name, extra_item_qty, notes, status, exported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now.isoformat(),
@@ -419,42 +503,152 @@ def save_order(payload: dict):
                 payload.get("extra_item_name", ""),
                 payload.get("extra_item_qty", 0),
                 payload.get("notes", ""),
+                "active",
+                "",
             ),
         )
         conn.commit()
 
 
-def fetch_orders_for_day(day_iso: str):
+def update_order(order_id: int, payload: dict):
+    with closing(get_db()) as conn:
+        conn.execute(
+            """
+            UPDATE orders SET
+                telegram_user_id=?,
+                telegram_username=?,
+                tech_id=?,
+                bp_number=?,
+                xb3=?,
+                xb6=?,
+                xb7=?,
+                xb8=?,
+                xb10=?,
+                xg1=?,
+                xg1_4k=?,
+                xg2=?,
+                xid=?,
+                xi6=?,
+                xer10=?,
+                onu=?,
+                screen=?,
+                battery=?,
+                sensor=?,
+                camera=?,
+                extra_item_name=?,
+                extra_item_qty=?,
+                notes=?
+            WHERE id=?
+            """,
+            (
+                payload.get("telegram_user_id"),
+                payload.get("telegram_username", ""),
+                payload["tech_id"],
+                payload["bp_number"],
+                payload.get("xb3", 0),
+                payload.get("xb6", 0),
+                payload.get("xb7", 0),
+                payload.get("xb8", 0),
+                payload.get("xb10", 0),
+                payload.get("xg1", 0),
+                payload.get("xg1_4k", 0),
+                payload.get("xg2", 0),
+                payload.get("xid", 0),
+                payload.get("xi6", 0),
+                payload.get("xer10", 0),
+                payload.get("onu", 0),
+                payload.get("screen", 0),
+                payload.get("battery", 0),
+                payload.get("sensor", 0),
+                payload.get("camera", 0),
+                payload.get("extra_item_name", ""),
+                payload.get("extra_item_qty", 0),
+                payload.get("notes", ""),
+                order_id,
+            ),
+        )
+        conn.commit()
+
+
+def find_matching_active_order(day_iso: str, tech_id: str, bp_number: str) -> dict | None:
+    tech_key = normalize_tech_id(tech_id)
+    bp_key = normalize_bp_number(bp_number)
+
+    if not tech_key or not bp_key:
+        return None
+
     with closing(get_db()) as conn:
         rows = conn.execute(
             """
             SELECT * FROM orders
-            WHERE created_date=?
-            ORDER BY created_at ASC, id ASC
+            WHERE created_date=? AND status='active'
+            ORDER BY created_at DESC, id DESC
             """,
             (day_iso,),
         ).fetchall()
-        return [dict(r) for r in rows]
+
+    for row in rows:
+        row_dict = dict(row)
+        if (
+            normalize_tech_id(row_dict.get("tech_id", "")) == tech_key
+            and normalize_bp_number(row_dict.get("bp_number", "")) == bp_key
+        ):
+            return row_dict
+    return None
 
 
-def fetch_orders_for_day_until(day_iso: str, cutoff_iso: str):
+def save_or_merge_order(payload: dict):
+    day_iso = today_iso()
+    existing = find_matching_active_order(day_iso, payload["tech_id"], payload["bp_number"])
+
+    if not existing:
+        save_order(payload)
+        return {"merged": False, "message": "Your request was sent to WH successfully."}
+
+    merged_payload = merge_payload_with_existing(existing, payload)
+    error = validate_payload(merged_payload)
+    if error:
+        return {"merged": True, "error": error}
+
+    update_order(int(existing["id"]), merged_payload)
+    return {"merged": True, "message": "Your request was added to the existing active order successfully."}
+
+
+def fetch_orders_for_day(day_iso: str, status: str = "active"):
     with closing(get_db()) as conn:
         rows = conn.execute(
             """
             SELECT * FROM orders
-            WHERE created_date=? AND created_at<=?
+            WHERE created_date=? AND status=?
             ORDER BY created_at ASC, id ASC
             """,
-            (day_iso, cutoff_iso),
+            (day_iso, status),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def fetch_orders_since(start_date_iso: str):
+def fetch_orders_for_day_until(day_iso: str, cutoff_iso: str, status: str = "active"):
     with closing(get_db()) as conn:
         rows = conn.execute(
-            "SELECT * FROM orders WHERE created_date>=? ORDER BY created_at DESC, id DESC",
-            (start_date_iso,),
+            """
+            SELECT * FROM orders
+            WHERE created_date=? AND created_at<=? AND status=?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (day_iso, cutoff_iso, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def fetch_orders_since(start_date_iso: str, status: str = "active"):
+    with closing(get_db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE created_date>=? AND status=?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (start_date_iso, status),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -479,8 +673,27 @@ def delete_orders_by_ids(order_ids: list[int]) -> int:
         return cur.rowcount or 0
 
 
-def get_order_by_daily_number(day_iso: str, daily_number: int) -> dict | None:
-    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso))
+def move_orders_to_history(order_ids: list[int]) -> int:
+    if not order_ids:
+        return 0
+
+    exported_at = now_local().isoformat()
+    placeholders = ",".join(["?"] * len(order_ids))
+    with closing(get_db()) as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE orders
+            SET status='history', exported_at=?
+            WHERE id IN ({placeholders}) AND status='active'
+            """,
+            (exported_at, *order_ids),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+
+
+def get_order_by_daily_number(day_iso: str, daily_number: int, status: str = "active") -> dict | None:
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
     for row in rows:
         if row["daily_number"] == daily_number:
             return row
@@ -517,6 +730,8 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
         "extra_item_name",
         "extra_item_qty",
         "notes",
+        "status",
+        "exported_at",
     ])
     numbered_rows = enumerate_daily_orders(rows)
     for row in numbered_rows:
@@ -547,6 +762,8 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
             row["extra_item_name"],
             row["extra_item_qty"],
             row["notes"],
+            row.get("status", "active"),
+            row.get("exported_at", ""),
         ])
     return output.getvalue().encode("utf-8-sig")
 
@@ -702,37 +919,29 @@ def build_export_filename(report_day_iso: str, is_excel: bool = True) -> str:
 
 
 def admin_home_keyboard():
+    rows = [
+        [KeyboardButton("Home"), KeyboardButton("View Orders")],
+        [KeyboardButton("Order History"), KeyboardButton("Delete Order")],
+        [KeyboardButton("Export Orders"), KeyboardButton("View Statistics")],
+        [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
+    ]
+
+    rows.append([KeyboardButton("Manage Admins")])
+
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton("Home"), KeyboardButton("View Orders")],
-            [KeyboardButton("Delete Order"), KeyboardButton("Export Orders")],
-            [KeyboardButton("View Statistics"), KeyboardButton("Manage Admins")],
-            [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         one_time_keyboard=False,
         is_persistent=True,
     )
 
 
-def admin_main_menu(user_id: int):
-    message, _ = get_active_message_info()
-    msg_status = "Active" if message else "Inactive"
-
-    rows = [
-        [InlineKeyboardButton("View Orders", callback_data="view_orders")],
-        [InlineKeyboardButton("Delete Order", callback_data="delete_order_prompt")],
-        [InlineKeyboardButton("Export Orders", callback_data="export_orders_menu")],
-        [InlineKeyboardButton("View Statistics", callback_data="view_stats")],
-        [InlineKeyboardButton(f"Message for Technicians ({msg_status})", callback_data="message_menu")],
-        [InlineKeyboardButton("Set Max Equipment", callback_data="set_limits")],
-    ]
-
-    if is_owner(user_id):
-        rows.append([InlineKeyboardButton("Manage Admins", callback_data="manage_admins")])
-
-    rows.append([InlineKeyboardButton("Refresh", callback_data="refresh_menu")])
-    return InlineKeyboardMarkup(rows)
+def export_orders_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Export and Keep Orders", callback_data="export_keep")],
+        [InlineKeyboardButton("Export and Delete Exported Orders", callback_data="export_delete")],
+        [InlineKeyboardButton("Back", callback_data="back_main")],
+    ])
 
 
 def admin_message_menu():
@@ -765,14 +974,6 @@ def admin_limits_menu():
     return InlineKeyboardMarkup(rows)
 
 
-def export_orders_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Export and Keep Orders", callback_data="export_keep")],
-        [InlineKeyboardButton("Export and Delete Exported Orders", callback_data="export_delete")],
-        [InlineKeyboardButton("Back", callback_data="back_main")],
-    ])
-
-
 def manage_admins_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("List Admins", callback_data="list_admins")],
@@ -797,7 +998,7 @@ def admin_message_status_text():
 
 def weekly_stats_text():
     start_date = (now_local().date() - timedelta(days=6)).isoformat()
-    rows = fetch_orders_since(start_date)
+    rows = fetch_orders_since(start_date, status="active") + fetch_orders_since(start_date, status="history")
 
     totals = equipment_totals(rows)
 
@@ -835,8 +1036,8 @@ def weekly_stats_text():
     return "\n".join(lines)
 
 
-def orders_text_for_day(day_iso: str, title: str):
-    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso))
+def orders_text_for_day(day_iso: str, title: str, status: str = "active"):
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
     if not rows:
         return f"{title}\nDate: {day_iso}\n\nNo orders found."
 
@@ -878,7 +1079,61 @@ def orders_text_for_day(day_iso: str, title: str):
 
 
 def current_day_orders_text():
-    return orders_text_for_day(today_iso(), "📦 Today's Orders")
+    return orders_text_for_day(today_iso(), "📦 Today's Active Orders", status="active")
+
+
+def order_history_text():
+    start_date = (now_local().date() - timedelta(days=13)).isoformat()
+    rows = fetch_orders_since(start_date, status="history")
+
+    if not rows:
+        return "🗂️ Order History\n\nNo archived orders found in the last 14 days."
+
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["created_date"], []).append(row)
+
+    lines = ["🗂️ Order History", "Showing archived orders from the last 14 days.", ""]
+
+    for day_iso in sorted(grouped.keys(), reverse=True):
+        daily_rows = list(sorted(grouped[day_iso], key=lambda r: (r["created_at"], r["id"])))
+        numbered_rows = enumerate_daily_orders(daily_rows)
+        totals = equipment_totals(numbered_rows)
+
+        lines.append(f"Date: {day_iso}")
+        lines.append(f"Total archived orders: {len(numbered_rows)}")
+        lines.append("Equipment totals:")
+        lines.append(format_totals_multiline(totals))
+        lines.append("Order details:")
+
+        for row in numbered_rows:
+            items = []
+            for key in EQUIPMENT_ORDER[:-1]:
+                qty = int(row.get(key, 0) or 0)
+                if qty > 0:
+                    items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
+
+            extra_name = (row.get("extra_item_name") or "").strip()
+            extra_qty = int(row.get("extra_item_qty", 0) or 0)
+            if extra_qty > 0:
+                items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
+
+            item_text = ", ".join(items) if items else "No items"
+            created_display = "N/A"
+            if row.get("created_at"):
+                created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
+            export_display = ""
+            if row.get("exported_at"):
+                export_display = datetime.fromisoformat(row["exported_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
+            lines.append(
+                f"#{row['daily_number']} | {created_display} | Exported {export_display or 'N/A'} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+            )
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def list_admins_text():
@@ -979,7 +1234,7 @@ def build_excel_summary_from_rows(report_day_iso: str, rows: list[dict]) -> byte
         "xb3", "xb6", "xb7", "xb8", "xb10",
         "xg1", "xg1_4k", "xg2", "xid", "xi6",
         "xer10", "onu", "screen", "battery", "sensor", "camera",
-        "extra_item_name", "extra_item_qty", "notes"
+        "extra_item_name", "extra_item_qty", "notes", "status", "exported_at"
     ])
     for row in numbered_rows:
         ws_raw.append([
@@ -990,7 +1245,7 @@ def build_excel_summary_from_rows(report_day_iso: str, rows: list[dict]) -> byte
             row["xb3"], row["xb6"], row["xb7"], row["xb8"], row["xb10"],
             row["xg1"], row["xg1_4k"], row["xg2"], row["xid"], row["xi6"],
             row["xer10"], row["onu"], row["screen"], row["battery"], row["sensor"], row["camera"],
-            row["extra_item_name"], row["extra_item_qty"], row["notes"]
+            row["extra_item_name"], row["extra_item_qty"], row["notes"], row.get("status", "active"), row.get("exported_at", "")
         ])
 
     wb.save(output)
@@ -1024,10 +1279,10 @@ async def send_orders_export(chat_id: int, bot, report_day_iso: str, rows: list[
 async def run_export_action(chat_id: int, bot, delete_after_export: bool):
     report_day = today_iso()
     cutoff_iso = now_local().isoformat()
-    rows = fetch_orders_for_day_until(report_day, cutoff_iso)
+    rows = fetch_orders_for_day_until(report_day, cutoff_iso, status="active")
 
     if not rows:
-        await bot.send_message(chat_id=chat_id, text=f"No orders found for {report_day}.")
+        await bot.send_message(chat_id=chat_id, text=f"No active orders found for {report_day}.")
         return
 
     await send_orders_export(
@@ -1038,14 +1293,20 @@ async def run_export_action(chat_id: int, bot, delete_after_export: bool):
         delete_after_export=delete_after_export,
     )
 
+    order_ids = [int(r["id"]) for r in rows]
+
     if delete_after_export:
-        deleted_count = delete_orders_by_ids([int(r["id"]) for r in rows])
+        deleted_count = delete_orders_by_ids(order_ids)
         await bot.send_message(
             chat_id=chat_id,
-            text=f"Export completed.\nDeleted exported orders: {deleted_count}\nNew orders created after export remained active.",
+            text=f"Export completed.\nDeleted exported active orders: {deleted_count}\nNew orders created after export remained active.",
         )
     else:
-        await bot.send_message(chat_id=chat_id, text="Export completed. Orders were kept.")
+        moved_count = move_orders_to_history(order_ids)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Export completed.\nMoved exported active orders to Order History: {moved_count}",
+        )
 
 
 async def admin_safe_answer(query):
@@ -1076,12 +1337,8 @@ async def admin_start_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_admin(user.id):
         add_admin_user(user.id, user.username or "", "owner" if is_owner(user.id) else "admin", None)
         await update.message.reply_text(
-            "Admin bot ready.",
+            "Admin bot ready. Use the buttons below.",
             reply_markup=admin_home_keyboard(),
-        )
-        await update.message.reply_text(
-            "Select an option below.",
-            reply_markup=admin_main_menu(user.id),
         )
         return
 
@@ -1124,20 +1381,12 @@ async def admin_authorize_command(update: Update, context: ContextTypes.DEFAULT_
             "Owner admin access granted.",
             reply_markup=admin_home_keyboard(),
         )
-        await update.message.reply_text(
-            "Select an option below.",
-            reply_markup=admin_main_menu(user.id),
-        )
         return
 
     if is_admin(user.id):
         await update.message.reply_text(
             "Admin access already active.",
             reply_markup=admin_home_keyboard(),
-        )
-        await update.message.reply_text(
-            "Select an option below.",
-            reply_markup=admin_main_menu(user.id),
         )
         return
 
@@ -1157,45 +1406,49 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     data = query.data
 
-    if data in ("refresh_menu", "back_main"):
+    if data == "back_main":
         context.user_data.pop("awaiting", None)
-        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, "Use the buttons below.")
         return
 
     if data == "view_orders":
-        await admin_safe_edit_message(query, current_day_orders_text(), reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, current_day_orders_text())
+        return
+
+    if data == "order_history":
+        await admin_safe_edit_message(query, order_history_text())
         return
 
     if data == "delete_order_prompt":
         context.user_data["awaiting"] = "delete_order_number"
         await admin_safe_edit_message(
             query,
-            "Send the daily order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_main")]])
         )
         return
 
     if data == "view_stats":
-        await admin_safe_edit_message(query, weekly_stats_text(), reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, weekly_stats_text())
         return
 
     if data == "export_orders_menu":
         context.user_data.pop("awaiting", None)
         await admin_safe_edit_message(
             query,
-            "Choose how to export today's orders.",
+            "Choose how to export today's active orders.",
             reply_markup=export_orders_menu(),
         )
         return
 
     if data == "export_keep":
         await run_export_action(query.message.chat_id, context.bot, delete_after_export=False)
-        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, "Export completed. Use the buttons below.")
         return
 
     if data == "export_delete":
         await run_export_action(query.message.chat_id, context.bot, delete_after_export=True)
-        await admin_safe_edit_message(query, "Select an option below.", reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, "Export completed. Use the buttons below.")
         return
 
     if data == "message_menu":
@@ -1223,7 +1476,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "delete_message":
         clear_technician_message()
         context.user_data.pop("awaiting", None)
-        await admin_safe_edit_message(query, "Technician message deleted.", reply_markup=admin_main_menu(user.id))
+        await admin_safe_edit_message(query, "Technician message deleted.")
         return
 
     if data == "set_limits":
@@ -1243,7 +1496,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "manage_admins":
         if not is_owner(user.id):
-            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.")
             return
         context.user_data.pop("awaiting", None)
         await admin_safe_edit_message(query, "Admin management", reply_markup=manage_admins_menu())
@@ -1251,14 +1504,14 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "list_admins":
         if not is_owner(user.id):
-            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.")
             return
         await admin_safe_edit_message(query, list_admins_text(), reply_markup=manage_admins_menu())
         return
 
     if data == "add_admin_prompt":
         if not is_owner(user.id):
-            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.")
             return
         context.user_data["awaiting"] = "add_admin_id"
         await admin_safe_edit_message(
@@ -1270,7 +1523,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "remove_admin_prompt":
         if not is_owner(user.id):
-            await admin_safe_edit_message(query, "Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await admin_safe_edit_message(query, "Only the owner can manage admin users.")
             return
         context.user_data["awaiting"] = "remove_admin_id"
         await admin_safe_edit_message(
@@ -1286,7 +1539,11 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = (update.message.text or "").strip()
 
     if not is_admin(user.id):
-        if text.lower() in {"home", "view orders", "delete order", "export orders", "view statistics", "manage admins", "message for technicians", "set max equipment"}:
+        if text.lower() in {
+            "home", "view orders", "order history", "delete order",
+            "export orders", "view statistics", "manage admins",
+            "message for technicians", "set max equipment"
+        }:
             await update.message.reply_text("Unauthorized.")
         return
 
@@ -1294,39 +1551,44 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if text == "Home":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu(user.id))
+        await update.message.reply_text("Use the buttons below.", reply_markup=admin_home_keyboard())
         return
 
     if text == "View Orders":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text(current_day_orders_text(), reply_markup=admin_main_menu(user.id))
+        await update.message.reply_text(current_day_orders_text(), reply_markup=admin_home_keyboard())
+        return
+
+    if text == "Order History":
+        context.user_data.pop("awaiting", None)
+        await update.message.reply_text(order_history_text(), reply_markup=admin_home_keyboard())
         return
 
     if text == "Delete Order":
         context.user_data["awaiting"] = "delete_order_number"
         await update.message.reply_text(
-            "Send the daily order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
-            reply_markup=admin_main_menu(user.id),
+            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            reply_markup=admin_home_keyboard(),
         )
         return
 
     if text == "Export Orders":
         context.user_data.pop("awaiting", None)
         await update.message.reply_text(
-            "Choose how to export today's orders.",
+            "Choose how to export today's active orders.",
             reply_markup=export_orders_menu(),
         )
         return
 
     if text == "View Statistics":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text(weekly_stats_text(), reply_markup=admin_main_menu(user.id))
+        await update.message.reply_text(weekly_stats_text(), reply_markup=admin_home_keyboard())
         return
 
     if text == "Manage Admins":
         context.user_data.pop("awaiting", None)
         if not is_owner(user.id):
-            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_home_keyboard())
             return
         await update.message.reply_text("Admin management", reply_markup=manage_admins_menu())
         return
@@ -1342,7 +1604,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if not awaiting:
-        await update.message.reply_text("Select an option below.", reply_markup=admin_main_menu(user.id))
+        await update.message.reply_text("Use the buttons below.", reply_markup=admin_home_keyboard())
         return
 
     if awaiting in ("technician_message_create", "technician_message_edit"):
@@ -1352,7 +1614,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         expires = datetime.fromisoformat(active_until).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
         await update.message.reply_text(
             f"Technician message saved.\nActive until: {expires}",
-            reply_markup=admin_main_menu(user.id),
+            reply_markup=admin_home_keyboard(),
         )
         return
 
@@ -1371,7 +1633,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         label = SETTABLE_LIMITS.get(setting_key, setting_key)
         await update.message.reply_text(
             f"{label} updated to {value}.",
-            reply_markup=admin_main_menu(user.id),
+            reply_markup=admin_home_keyboard(),
         )
         return
 
@@ -1381,26 +1643,26 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if daily_number <= 0:
                 raise ValueError
         except Exception:
-            await update.message.reply_text("Enter a valid daily order number like 1, 2, or 3.")
+            await update.message.reply_text("Enter a valid daily active order number like 1, 2, or 3.")
             return
 
-        row = get_order_by_daily_number(today_iso(), daily_number)
+        row = get_order_by_daily_number(today_iso(), daily_number, status="active")
         if not row:
-            await update.message.reply_text("That order number was not found for today.")
+            await update.message.reply_text("That active order number was not found for today.")
             return
 
         deleted_count = delete_orders_by_ids([int(row["id"])])
         context.user_data.pop("awaiting", None)
         await update.message.reply_text(
             f"Order #{daily_number} deleted.\nRemoved records: {deleted_count}",
-            reply_markup=admin_main_menu(user.id),
+            reply_markup=admin_home_keyboard(),
         )
         return
 
     if awaiting == "add_admin_id":
         if not is_owner(user.id):
             context.user_data.pop("awaiting", None)
-            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_home_keyboard())
             return
 
         try:
@@ -1422,7 +1684,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if awaiting == "remove_admin_id":
         if not is_owner(user.id):
             context.user_data.pop("awaiting", None)
-            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_main_menu(user.id))
+            await update.message.reply_text("Only the owner can manage admin users.", reply_markup=admin_home_keyboard())
             return
 
         try:
@@ -1525,11 +1787,16 @@ def webapp_page():
         f"Screen {limits['screen']}, "
         f"Additional Item {limits['extra_item']}."
     )
+    prefill = {
+        "telegram_user_id": request.args.get("uid", "").strip(),
+        "telegram_username": request.args.get("username", "").strip(),
+    }
     return render_template(
         "request_form.html",
         limits=limits,
         popup_message=popup_message,
         technician_message=technician_message,
+        prefill=prefill,
     )
 
 
@@ -1591,13 +1858,47 @@ def create_order():
             technician_message=technician_message,
             form_data=payload,
             form_error=error,
+            prefill={
+                "telegram_user_id": payload.get("telegram_user_id", ""),
+                "telegram_username": payload.get("telegram_username", ""),
+            },
         ), 400
 
-    save_order(payload)
+    result = save_or_merge_order(payload)
+    if result.get("error"):
+        limits = get_limits()
+        technician_message = get_active_technician_message()
+        popup_message = (
+            "Badge is required to pick up equipment. "
+            "The warehouse closes at 9:00 AM. "
+            "Please check your buffer first. "
+            f"Maximum allowed quantities: "
+            f"Modems {limits['modems_total']} total, "
+            f"XI6 {limits['xi6']}, "
+            f"XID {limits['xid']}, "
+            f"XG2 {limits['xg2']}, "
+            f"DVR {limits['dvr_total']} total, "
+            f"XER10 {limits['xer10']}, "
+            f"ONU {limits['onu']}, "
+            f"Screen {limits['screen']}, "
+            f"Additional Item {limits['extra_item']}."
+        )
+        return render_template(
+            "request_form.html",
+            limits=limits,
+            popup_message=popup_message,
+            technician_message=technician_message,
+            form_data=payload,
+            form_error=result["error"],
+            prefill={
+                "telegram_user_id": payload.get("telegram_user_id", ""),
+                "telegram_username": payload.get("telegram_username", ""),
+            },
+        ), 400
 
     return render_template(
         "success.html",
-        confirmation_message="Your request was sent to WH successfully.",
+        confirmation_message=result["message"],
         bp_number=payload["bp_number"],
     )
 
@@ -1609,7 +1910,7 @@ def admin_export_api():
         return jsonify({"error": "Unauthorized"}), 401
 
     day_iso = request.args.get("date") or yesterday_iso()
-    rows = fetch_orders_for_day(day_iso)
+    rows = fetch_orders_for_day(day_iso, status="active")
     csv_bytes = build_csv_bytes_from_rows(rows)
     filename = build_export_filename(day_iso, is_excel=False)
     return Response(
@@ -1626,7 +1927,7 @@ def admin_export_check():
         return jsonify({"error": "Unauthorized"}), 401
 
     day_iso = request.args.get("date") or yesterday_iso()
-    rows = fetch_orders_for_day(day_iso)
+    rows = fetch_orders_for_day(day_iso, status="active")
     return jsonify({
         "ok": True,
         "date": day_iso,
