@@ -9,6 +9,22 @@
   <title>Warehouse Request</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    .admin-message-image {
+      width: 100%;
+      max-width: 420px;
+      display: block;
+      margin: 0 auto 14px;
+      border-radius: 16px;
+      object-fit: cover;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+    }
+
+    .admin-message-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
 </head>
 <body>
   <div id="noticeModal" class="modal-bg">
@@ -19,11 +35,30 @@
     </div>
   </div>
 
-  {% if technician_message %}
+  {% if technician_message or technician_message_type == 'photo' %}
   <div id="adminMessageModal" class="modal-bg hidden">
     <div class="modal-card">
       <h2>Message from Admin</h2>
-      <p>{{ technician_message }}</p>
+
+      {% if technician_message_type == 'photo' and technician_message_image_url %}
+        <img
+          src="{{ technician_message_image_url }}"
+          alt="Admin message image"
+          class="admin-message-image"
+        >
+        {% if technician_message %}
+          <p class="admin-message-text">{{ technician_message }}</p>
+        {% endif %}
+      {% else %}
+        <p class="admin-message-text">{{ technician_message }}</p>
+      {% endif %}
+
+      {% if technician_message_active_until %}
+      <p class="limits-note">
+        Active until: {{ technician_message_active_until }}
+      </p>
+      {% endif %}
+
       <button type="button" class="primary-btn" onclick="acceptAdminNotice()">Accept</button>
     </div>
   </div>
@@ -280,7 +315,7 @@
 
   <script>
     window.APP_LIMITS = {{ limits | tojson }};
-    window.HAS_ADMIN_MESSAGE = {{ 'true' if technician_message else 'false' }};
+    window.HAS_ADMIN_MESSAGE = {{ 'true' if (technician_message or technician_message_type == 'photo') else 'false' }};
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

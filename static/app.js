@@ -135,6 +135,7 @@
 
   window.acceptPrimaryNotice = function acceptPrimaryNotice() {
     hideKeyboard();
+
     const modal = byId("noticeModal");
     if (modal) modal.classList.add("hidden");
 
