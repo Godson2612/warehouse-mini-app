@@ -1,3 +1,4 @@
+
 import os
 import io
 import csv
@@ -185,6 +186,21 @@ def column_exists(conn, table_name: str, column_name: str) -> bool:
     return any(r["name"] == column_name for r in rows)
 
 
+def get_setting_from_conn(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting_with_conn(conn, key: str, value: str):
+    conn.execute(
+        """
+        INSERT INTO settings(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, value),
+    )
+
+
 def init_db():
     with closing(get_db()) as conn:
         conn.executescript(SCHEMA_SQL)
@@ -223,21 +239,6 @@ def init_db():
         conn.commit()
 
 
-def get_setting_from_conn(conn, key: str, default: str = "") -> str:
-    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else default
-
-
-def set_setting_with_conn(conn, key: str, value: str):
-    conn.execute(
-        """
-        INSERT INTO settings(key, value) VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-        """,
-        (key, value),
-    )
-
-
 def get_setting(key: str, default: str = "") -> str:
     with closing(get_db()) as conn:
         return get_setting_from_conn(conn, key, default)
@@ -247,6 +248,31 @@ def set_setting(key: str, value: str):
     with closing(get_db()) as conn:
         set_setting_with_conn(conn, key, value)
         conn.commit()
+
+
+def now_local() -> datetime:
+    return datetime.now(TZ)
+
+
+def today_iso() -> str:
+    return now_local().date().isoformat()
+
+
+def yesterday_iso() -> str:
+    return (now_local().date() - timedelta(days=1)).isoformat()
+
+
+def plus_27_hours_iso() -> str:
+    return (now_local() + timedelta(hours=27)).isoformat()
+
+
+def fmt_dt_local(iso_value: str | None) -> str:
+    if not iso_value:
+        return "N/A"
+    try:
+        return datetime.fromisoformat(iso_value).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
+    except Exception:
+        return iso_value
 
 
 def get_limits():
@@ -279,7 +305,7 @@ def is_owner(user_id: int) -> bool:
 
 
 def add_admin_user(user_id: int, username: str = "", role: str = "admin", added_by: int | None = None):
-    now = datetime.now(TZ).isoformat()
+    now = now_local().isoformat()
     with closing(get_db()) as conn:
         conn.execute(
             """
@@ -335,22 +361,6 @@ def parse_int(value, default=0):
         return default
 
 
-def now_local() -> datetime:
-    return datetime.now(TZ)
-
-
-def today_iso() -> str:
-    return now_local().date().isoformat()
-
-
-def yesterday_iso() -> str:
-    return (now_local().date() - timedelta(days=1)).isoformat()
-
-
-def plus_27_hours_iso() -> str:
-    return (now_local() + timedelta(hours=27)).isoformat()
-
-
 def get_active_message_info():
     message = get_setting("technician_message", "").strip()
     active_until = get_setting("technician_message_active_until", "").strip()
@@ -361,14 +371,11 @@ def get_active_message_info():
     try:
         expires_at = datetime.fromisoformat(active_until)
     except Exception:
-        set_setting("technician_message", "")
-        set_setting("technician_message_active_until", "")
+        clear_technician_message()
         return "", ""
 
-    now = now_local()
-    if now > expires_at:
-        set_setting("technician_message", "")
-        set_setting("technician_message_active_until", "")
+    if now_local() > expires_at:
+        clear_technician_message()
         return "", ""
 
     return message, active_until
@@ -380,9 +387,8 @@ def get_active_technician_message() -> str:
 
 
 def set_technician_message(message: str):
-    active_until = get_end_of_today_iso()
-    set_setting("technician_message", message)
-    set_setting("technician_message_active_until", active_until)
+    set_setting("technician_message", message.strip())
+    set_setting("technician_message_active_until", plus_27_hours_iso())
 
 
 def clear_technician_message():
@@ -414,7 +420,6 @@ def combine_extra_item_names(existing_name: str, new_name: str) -> str:
         return right
     if not right:
         return left
-
     if normalize_basic_key(left) == normalize_basic_key(right):
         return left
 
@@ -440,7 +445,6 @@ def merge_payload_with_existing(existing_row: dict, payload: dict) -> dict:
 
     merged["telegram_user_id"] = payload.get("telegram_user_id") or existing_row.get("telegram_user_id")
     merged["telegram_username"] = (payload.get("telegram_username") or "").strip() or (existing_row.get("telegram_username") or "").strip()
-
     merged["tech_id"] = (existing_row.get("tech_id") or payload.get("tech_id") or "").strip()
     merged["bp_number"] = (existing_row.get("bp_number") or payload.get("bp_number") or "").strip()
 
@@ -623,19 +627,6 @@ def fetch_orders_for_day(day_iso: str, status: str = "active"):
         return [dict(r) for r in rows]
 
 
-def fetch_orders_for_day_until(day_iso: str, cutoff_iso: str, status: str = "active"):
-    with closing(get_db()) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM orders
-            WHERE created_date=? AND created_at<=? AND status=?
-            ORDER BY created_at ASC, id ASC
-            """,
-            (day_iso, cutoff_iso, status),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
 def fetch_orders_since(start_date_iso: str, status: str = "active"):
     with closing(get_db()) as conn:
         rows = conn.execute(
@@ -690,7 +681,7 @@ def get_active_cycle_start_iso() -> str:
     return row["created_at"] if row else ""
 
 
-def enumerate_daily_orders(rows: list[dict]) -> list[dict]:
+def enumerate_orders(rows: list[dict]) -> list[dict]:
     numbered = []
     for index, row in enumerate(rows, start=1):
         item = dict(row)
@@ -710,11 +701,11 @@ def delete_orders_by_ids(order_ids: list[int]) -> int:
         return cur.rowcount or 0
 
 
-def move_orders_to_history(order_ids: list[int]) -> int:
+def move_orders_to_history(order_ids: list[int], exported_at_iso: str | None = None) -> int:
     if not order_ids:
         return 0
 
-    exported_at = now_local().isoformat()
+    exported_at = exported_at_iso or now_local().isoformat()
     placeholders = ",".join(["?"] * len(order_ids))
     with closing(get_db()) as conn:
         cur = conn.execute(
@@ -729,10 +720,10 @@ def move_orders_to_history(order_ids: list[int]) -> int:
         return cur.rowcount or 0
 
 
-def get_order_by_daily_number(day_iso: str, daily_number: int, status: str = "active") -> dict | None:
-    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
+def get_cycle_order_by_number(order_number: int, status: str = "active") -> dict | None:
+    rows = enumerate_orders(fetch_active_cycle_orders(status=status))
     for row in rows:
-        if row["daily_number"] == daily_number:
+        if row["daily_number"] == order_number:
             return row
     return None
 
@@ -741,7 +732,7 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "daily_number",
+        "order_number",
         "created_at",
         "created_date",
         "telegram_user_id",
@@ -770,8 +761,7 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
         "status",
         "exported_at",
     ])
-    numbered_rows = enumerate_daily_orders(rows)
-    for row in numbered_rows:
+    for row in enumerate_orders(rows):
         writer.writerow([
             row["daily_number"],
             row["created_at"],
@@ -949,15 +939,15 @@ def format_totals_multiline(totals: dict) -> str:
     return "\n".join(lines) if lines else "- No equipment requested"
 
 
-def build_export_filename(report_day_iso: str, is_excel: bool = True) -> str:
+def build_export_filename(is_excel: bool = True) -> str:
     stamp = now_local().strftime("%Y-%m-%d_%I-%M-%S_%p")
     ext = "xlsx" if is_excel else "csv"
-    return f"orders_{report_day_iso}_{stamp}.{ext}"
+    return f"orders_export_{stamp}.{ext}"
 
 
 def admin_home_keyboard():
     rows = [
-        [KeyboardButton("Home"), KeyboardButton("View Orders")],
+        [KeyboardButton("Start"), KeyboardButton("View Orders")],
         [KeyboardButton("Order History"), KeyboardButton("Delete Order")],
         [KeyboardButton("Export Orders"), KeyboardButton("View Statistics")],
         [KeyboardButton("Message for Technicians"), KeyboardButton("Set Max Equipment")],
@@ -1024,11 +1014,10 @@ def admin_message_status_text():
     if not message:
         return "No active technician message."
 
-    expires = datetime.fromisoformat(active_until).astimezone(TZ)
     return (
         "Current technician message:\n\n"
         f"{message}\n\n"
-        f"Active until: {expires.strftime('%Y-%m-%d %I:%M:%S %p')}"
+        f"Active until: {fmt_dt_local(active_until)}"
     )
 
 
@@ -1072,16 +1061,36 @@ def weekly_stats_text():
     return "\n".join(lines)
 
 
-def orders_text_for_day(day_iso: str, title: str, status: str = "active"):
-    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
+def _items_for_row(row: dict) -> str:
+    items = []
+    for key in EQUIPMENT_ORDER[:-1]:
+        qty = int(row.get(key, 0) or 0)
+        if qty > 0:
+            items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
+
+    extra_name = (row.get("extra_item_name") or "").strip()
+    extra_qty = int(row.get("extra_item_qty", 0) or 0)
+    if extra_qty > 0:
+        items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
+
+    return ", ".join(items) if items else "No items"
+
+
+def current_cycle_orders_text():
+    cycle_start = get_active_cycle_start_iso()
+    rows = enumerate_orders(fetch_active_cycle_orders(status="active"))
+
     if not rows:
-        return f"{title}\nDate: {day_iso}\n\nNo orders found."
+        return (
+            "📦 Current Active Orders\n"
+            "Cycle start: waiting for first new order\n\n"
+            "No active orders found in the current cycle."
+        )
 
     totals = equipment_totals(rows)
-
     lines = [
-        title,
-        f"Date: {day_iso}",
+        "📦 Current Active Orders",
+        f"Cycle start: {fmt_dt_local(cycle_start)}",
         f"Total orders: {len(rows)}",
         "",
         "Equipment totals:",
@@ -1091,73 +1100,14 @@ def orders_text_for_day(day_iso: str, title: str, status: str = "active"):
     ]
 
     for row in rows:
-        items = []
-        for key in EQUIPMENT_ORDER[:-1]:
-            qty = int(row.get(key, 0) or 0)
-            if qty > 0:
-                items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
-
-        extra_name = (row.get("extra_item_name") or "").strip()
-        extra_qty = int(row.get("extra_item_qty", 0) or 0)
-        if extra_qty > 0:
-            items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
-
-        item_text = ", ".join(items) if items else "No items"
-        created_display = "N/A"
-        if row.get("created_at"):
-            created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
-
-        lines.append(
-            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
-        )
-
-    return "\n".join(lines)
-
-
-def current_cycle_orders_text():
-    cycle_start = get_active_cycle_start_iso()
-    rows = fetch_active_cycle_orders(status="active")
-
-    if not rows:
-        return (
-            "📦 Current Active Orders\n"
-            "Cycle start: waiting for first new order\n\n"
-            "No active orders found in the current cycle."
-        )
-
-    numbered_rows = enumerate_daily_orders(rows)
-    totals = equipment_totals(numbered_rows)
-    lines = [
-        "📦 Current Active Orders",
-        f"Cycle start: {fmt_dt_local(cycle_start)}",
-        f"Total orders: {len(numbered_rows)}",
-        "",
-        "Equipment totals:",
-        format_totals_multiline(totals),
-        "",
-        "Order details:",
-    ]
-
-    for row in numbered_rows:
-        items = []
-        for key in EQUIPMENT_ORDER[:-1]:
-            qty = int(row.get(key, 0) or 0)
-            if qty > 0:
-                items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
-
-        extra_name = (row.get("extra_item_name") or "").strip()
-        extra_qty = int(row.get("extra_item_qty", 0) or 0)
-        if extra_qty > 0:
-            items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
-
-        item_text = ", ".join(items) if items else "No items"
         created_display = fmt_dt_local(row.get("created_at"))
-
         lines.append(
-            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {_items_for_row(row)}"
         )
 
     return "\n".join(lines)
+
+
 def order_history_text():
     start_date = (now_local().date() - timedelta(days=13)).isoformat()
     rows = fetch_orders_since(start_date, status="history")
@@ -1179,7 +1129,7 @@ def order_history_text():
 
     for day_iso in sorted(grouped.keys(), reverse=True):
         daily_rows = list(sorted(grouped[day_iso], key=lambda r: (r.get("exported_at", ""), r["created_at"], r["id"])))
-        numbered_rows = enumerate_daily_orders(daily_rows)
+        numbered_rows = enumerate_orders(daily_rows)
         totals = equipment_totals(numbered_rows)
 
         lines.append(f"Export date: {day_iso}")
@@ -1189,28 +1139,10 @@ def order_history_text():
         lines.append("Order details:")
 
         for row in numbered_rows:
-            items = []
-            for key in EQUIPMENT_ORDER[:-1]:
-                qty = int(row.get(key, 0) or 0)
-                if qty > 0:
-                    items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
-
-            extra_name = (row.get("extra_item_name") or "").strip()
-            extra_qty = int(row.get("extra_item_qty", 0) or 0)
-            if extra_qty > 0:
-                items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
-
-            item_text = ", ".join(items) if items else "No items"
-            created_display = "N/A"
-            if row.get("created_at"):
-                created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
-
-            export_display = ""
-            if row.get("exported_at"):
-                export_display = datetime.fromisoformat(row["exported_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
-
             lines.append(
-                f"#{row['daily_number']} | {created_display} | Exported {export_display or 'N/A'} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+                f"#{row['daily_number']} | {fmt_dt_local(row.get('created_at'))} | "
+                f"Exported {fmt_dt_local(row.get('exported_at'))} | "
+                f"Tech {row['tech_id']} | BP {row['bp_number']} | {_items_for_row(row)}"
             )
 
         lines.append("")
@@ -1236,7 +1168,7 @@ def list_admins_text():
 
 def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, rows: list[dict]) -> bytes:
     output = io.BytesIO()
-    numbered_rows = enumerate_daily_orders(rows)
+    numbered_rows = enumerate_orders(rows)
 
     try:
         from openpyxl import Workbook
@@ -1252,8 +1184,8 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
 
     ws_overview = wb.active
     ws_overview.title = "Overview"
-    ws_overview.append(["Report Date", report_day_iso])
-    ws_overview.append(["Exported At", now_local().strftime("%Y-%m-%d %I:%M:%S %p")])
+    ws_overview.append(["Cycle Start", fmt_dt_local(cycle_start_iso)])
+    ws_overview.append(["Exported At", fmt_dt_local(export_time_iso)])
     ws_overview.append(["Total Orders", len(numbered_rows)])
     ws_overview.append([])
     ws_overview.append(["Equipment", "Total Qty"])
@@ -1309,8 +1241,9 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
 
     ws_raw = wb.create_sheet("Raw Orders")
     ws_raw.append([
-        "daily_number",
+        "order_number",
         "created_at",
+        "created_date",
         "tech_id",
         "bp_number",
         "xb3", "xb6", "xb7", "xb8", "xb10",
@@ -1322,6 +1255,7 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
         ws_raw.append([
             row["daily_number"],
             row["created_at"],
+            row["created_date"],
             row["tech_id"],
             row["bp_number"],
             row["xb3"], row["xb6"], row["xb7"], row["xb8"], row["xb10"],
@@ -1500,7 +1434,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "delete_order_number"
         await admin_safe_edit_message(
             query,
-            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            "Send the current cycle order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_main")]])
         )
         return
@@ -1536,7 +1470,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "technician_message_create"
         await admin_safe_edit_message(
             query,
-            "Send the new message for technicians now.\nIt will expire automatically today at 11:59 PM.",
+            "Send the new message for technicians now.\nIt will expire automatically 27 hours after you send it.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
         return
@@ -1545,7 +1479,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "technician_message_edit"
         await admin_safe_edit_message(
             query,
-            "Send the updated message for technicians now.\nIt will expire automatically today at 11:59 PM.",
+            "Send the updated message for technicians now.\nIt will expire automatically 27 hours after you send it.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
         return
@@ -1617,18 +1551,20 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not is_admin(user.id):
         if text.lower() in {
-            "home", "view orders", "order history", "delete order",
+            "start", "view orders", "order history", "delete order",
             "export orders", "view statistics", "manage admins",
             "message for technicians", "set max equipment"
         }:
-            await update.message.reply_text("Unauthorized.")
+            await update.message.reply_text(
+                "Unauthorized.\n\nIf you should have access, press /start first or ask the owner to add you as admin."
+            )
         return
 
     awaiting = context.user_data.get("awaiting")
 
-    if text == "Home":
+    if text == "Start":
         context.user_data.pop("awaiting", None)
-        await update.message.reply_text("Use the buttons below.", reply_markup=admin_home_keyboard())
+        await admin_start_command(update, context)
         return
 
     if text == "View Orders":
@@ -1644,7 +1580,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text == "Delete Order":
         context.user_data["awaiting"] = "delete_order_number"
         await update.message.reply_text(
-            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
+            "Send the current cycle order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers.",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1688,9 +1624,8 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         set_technician_message(text)
         context.user_data.pop("awaiting", None)
         _, active_until = get_active_message_info()
-        expires = datetime.fromisoformat(active_until).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
         await update.message.reply_text(
-            f"Technician message saved.\nActive until: {expires}",
+            f"Technician message saved.\nActive until: {fmt_dt_local(active_until)}",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1716,22 +1651,22 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if awaiting == "delete_order_number":
         try:
-            daily_number = int(text)
-            if daily_number <= 0:
+            order_number = int(text)
+            if order_number <= 0:
                 raise ValueError
         except Exception:
             await update.message.reply_text("Enter a valid current cycle order number like 1, 2, or 3.")
             return
 
-        row = get_order_by_daily_number(today_iso(), daily_number, status="active")
+        row = get_cycle_order_by_number(order_number, status="active")
         if not row:
-            await update.message.reply_text("That active order number was not found for today.")
+            await update.message.reply_text("That current cycle order number was not found.")
             return
 
         deleted_count = delete_orders_by_ids([int(row["id"])])
         context.user_data.pop("awaiting", None)
         await update.message.reply_text(
-            f"Order #{daily_number} deleted.\nRemoved records: {deleted_count}",
+            f"Order #{order_number} deleted.\nRemoved records: {deleted_count}",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1985,10 +1920,14 @@ def admin_export_api():
     if token != ADMIN_ACCESS_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
 
-    day_iso = request.args.get("date") or yesterday_iso()
-    rows = fetch_orders_for_day(day_iso, status="active")
+    date_param = (request.args.get("date") or "").strip()
+    if date_param:
+        rows = fetch_orders_for_day(date_param, status="active")
+    else:
+        rows = fetch_active_cycle_orders(status="active")
+
     csv_bytes = build_csv_bytes_from_rows(rows)
-    filename = build_export_filename(day_iso, is_excel=False)
+    filename = build_export_filename(is_excel=False)
     return Response(
         csv_bytes,
         mimetype="text/csv",
@@ -1998,11 +1937,17 @@ def admin_export_api():
 
 @app.get("/admin/export/check")
 def admin_export_check():
-    day_iso = request.args.get("date") or yesterday_iso()
-    rows = fetch_orders_for_day(day_iso, status="active")
+    date_param = (request.args.get("date") or "").strip()
+    if date_param:
+        rows = fetch_orders_for_day(date_param, status="active")
+        label = date_param
+    else:
+        rows = fetch_active_cycle_orders(status="active")
+        label = f"cycle_start={get_active_cycle_start_iso() or 'none'}"
+
     return jsonify({
         "ok": True,
-        "date": day_iso,
+        "scope": label,
         "orders_found": len(rows),
         "generated_at": now_local().isoformat(),
     })
