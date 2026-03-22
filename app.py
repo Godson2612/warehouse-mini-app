@@ -2,13 +2,10 @@ import os
 import io
 import csv
 import re
-import json
 import sqlite3
 import logging
 import threading
 import asyncio
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from contextlib import closing
@@ -137,14 +134,8 @@ DEFAULT_SETTINGS = {
     "limit_sensor": "50",
     "limit_camera": "50",
     "limit_extra_item": "10",
-
-    "technician_message_type": "",
     "technician_message": "",
-    "technician_message_caption": "",
-    "technician_message_image_file_id": "",
     "technician_message_active_until": "",
-
-    "active_cycle_start_at": "",
     "owner_admin_id": "",
 }
 
@@ -194,55 +185,6 @@ def column_exists(conn, table_name: str, column_name: str) -> bool:
     return any(r["name"] == column_name for r in rows)
 
 
-def get_setting_from_conn(conn, key: str, default: str = "") -> str:
-    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else default
-
-
-def set_setting_with_conn(conn, key: str, value: str):
-    conn.execute(
-        """
-        INSERT INTO settings(key, value) VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-        """,
-        (key, value),
-    )
-
-
-def now_local() -> datetime:
-    return datetime.now(TZ)
-
-
-def today_iso() -> str:
-    return now_local().date().isoformat()
-
-
-def yesterday_iso() -> str:
-    return (now_local().date() - timedelta(days=1)).isoformat()
-
-
-def start_of_today_local() -> datetime:
-    now = now_local()
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def start_of_yesterday_iso() -> str:
-    return (start_of_today_local() - timedelta(days=1)).isoformat()
-
-
-def plus_27_hours_iso() -> str:
-    return (now_local() + timedelta(hours=27)).isoformat()
-
-
-def fmt_dt_local(iso_value: str | None) -> str:
-    if not iso_value:
-        return "N/A"
-    try:
-        return datetime.fromisoformat(iso_value).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
-    except Exception:
-        return iso_value
-
-
 def init_db():
     with closing(get_db()) as conn:
         conn.executescript(SCHEMA_SQL)
@@ -265,10 +207,6 @@ def init_db():
                 (key, value),
             )
 
-        cycle_start = get_setting_from_conn(conn, "active_cycle_start_at", "").strip()
-        if not cycle_start:
-            set_setting_with_conn(conn, "active_cycle_start_at", start_of_yesterday_iso())
-
         owner_id = get_setting_from_conn(conn, "owner_admin_id", "").strip()
         if not owner_id:
             oldest_admin = conn.execute(
@@ -283,6 +221,21 @@ def init_db():
                 )
 
         conn.commit()
+
+
+def get_setting_from_conn(conn, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting_with_conn(conn, key: str, value: str):
+    conn.execute(
+        """
+        INSERT INTO settings(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (key, value),
+    )
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -326,7 +279,7 @@ def is_owner(user_id: int) -> bool:
 
 
 def add_admin_user(user_id: int, username: str = "", role: str = "admin", added_by: int | None = None):
-    now = now_local().isoformat()
+    now = datetime.now(TZ).isoformat()
     with closing(get_db()) as conn:
         conn.execute(
             """
@@ -382,127 +335,58 @@ def parse_int(value, default=0):
         return default
 
 
-def get_active_cycle_start_iso() -> str:
-    raw = get_setting("active_cycle_start_at", "").strip()
-    if raw:
-        try:
-            datetime.fromisoformat(raw)
-            return raw
-        except Exception:
-            pass
-
-    fallback = start_of_yesterday_iso()
-    set_setting("active_cycle_start_at", fallback)
-    return fallback
+def now_local() -> datetime:
+    return datetime.now(TZ)
 
 
-def set_active_cycle_start_iso(value: str):
-    try:
-        datetime.fromisoformat(value)
-    except Exception:
-        value = now_local().isoformat()
-    set_setting("active_cycle_start_at", value)
+def today_iso() -> str:
+    return now_local().date().isoformat()
 
 
-def get_active_message_info() -> dict:
-    msg_type = get_setting("technician_message_type", "").strip()
+def yesterday_iso() -> str:
+    return (now_local().date() - timedelta(days=1)).isoformat()
+
+
+def plus_27_hours_iso() -> str:
+    return (now_local() + timedelta(hours=27)).isoformat()
+
+
+def get_active_message_info():
     message = get_setting("technician_message", "").strip()
-    caption = get_setting("technician_message_caption", "").strip()
-    image_file_id = get_setting("technician_message_image_file_id", "").strip()
     active_until = get_setting("technician_message_active_until", "").strip()
 
-    if not active_until:
-        clear_technician_message()
-        return {
-            "type": "",
-            "text": "",
-            "caption": "",
-            "image_file_id": "",
-            "active_until": "",
-            "image_url": "",
-        }
+    if not message or not active_until:
+        return "", ""
 
     try:
         expires_at = datetime.fromisoformat(active_until)
     except Exception:
-        clear_technician_message()
-        return {
-            "type": "",
-            "text": "",
-            "caption": "",
-            "image_file_id": "",
-            "active_until": "",
-            "image_url": "",
-        }
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return "", ""
 
-    if now_local() > expires_at:
-        clear_technician_message()
-        return {
-            "type": "",
-            "text": "",
-            "caption": "",
-            "image_file_id": "",
-            "active_until": "",
-            "image_url": "",
-        }
+    now = now_local()
+    if now > expires_at:
+        set_setting("technician_message", "")
+        set_setting("technician_message_active_until", "")
+        return "", ""
 
-    if msg_type == "photo" and image_file_id:
-        return {
-            "type": "photo",
-            "text": caption,
-            "caption": caption,
-            "image_file_id": image_file_id,
-            "active_until": active_until,
-            "image_url": f"{BASE_URL}/technician-message-image",
-        }
-
-    if msg_type == "text" and message:
-        return {
-            "type": "text",
-            "text": message,
-            "caption": "",
-            "image_file_id": "",
-            "active_until": active_until,
-            "image_url": "",
-        }
-
-    clear_technician_message()
-    return {
-        "type": "",
-        "text": "",
-        "caption": "",
-        "image_file_id": "",
-        "active_until": "",
-        "image_url": "",
-    }
+    return message, active_until
 
 
 def get_active_technician_message() -> str:
-    info = get_active_message_info()
-    return info["text"]
+    message, _ = get_active_message_info()
+    return message
 
 
-def set_technician_text_message(message: str):
-    set_setting("technician_message_type", "text")
-    set_setting("technician_message", message.strip())
-    set_setting("technician_message_caption", "")
-    set_setting("technician_message_image_file_id", "")
-    set_setting("technician_message_active_until", plus_27_hours_iso())
-
-
-def set_technician_photo_message(file_id: str, caption: str = ""):
-    set_setting("technician_message_type", "photo")
-    set_setting("technician_message", "")
-    set_setting("technician_message_caption", (caption or "").strip())
-    set_setting("technician_message_image_file_id", file_id.strip())
-    set_setting("technician_message_active_until", plus_27_hours_iso())
+def set_technician_message(message: str):
+    active_until = get_end_of_today_iso()
+    set_setting("technician_message", message)
+    set_setting("technician_message_active_until", active_until)
 
 
 def clear_technician_message():
-    set_setting("technician_message_type", "")
     set_setting("technician_message", "")
-    set_setting("technician_message_caption", "")
-    set_setting("technician_message_image_file_id", "")
     set_setting("technician_message_active_until", "")
 
 
@@ -739,6 +623,19 @@ def fetch_orders_for_day(day_iso: str, status: str = "active"):
         return [dict(r) for r in rows]
 
 
+def fetch_orders_for_day_until(day_iso: str, cutoff_iso: str, status: str = "active"):
+    with closing(get_db()) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE created_date=? AND created_at<=? AND status=?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (day_iso, cutoff_iso, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def fetch_orders_since(start_date_iso: str, status: str = "active"):
     with closing(get_db()) as conn:
         rows = conn.execute(
@@ -753,48 +650,47 @@ def fetch_orders_since(start_date_iso: str, status: str = "active"):
 
 
 def fetch_active_cycle_orders(status: str = "active"):
-    cycle_start = get_active_cycle_start_iso()
     with closing(get_db()) as conn:
         rows = conn.execute(
             """
             SELECT * FROM orders
-            WHERE status=? AND created_at>=?
+            WHERE status=?
             ORDER BY created_at ASC, id ASC
             """,
-            (status, cycle_start),
+            (status,),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
 def fetch_active_cycle_orders_until(cutoff_iso: str, status: str = "active"):
-    cycle_start = get_active_cycle_start_iso()
     with closing(get_db()) as conn:
         rows = conn.execute(
             """
             SELECT * FROM orders
-            WHERE status=? AND created_at>=? AND created_at<=?
+            WHERE status=? AND created_at<=?
             ORDER BY created_at ASC, id ASC
             """,
-            (status, cycle_start, cutoff_iso),
+            (status, cutoff_iso),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def fetch_history_orders(days_back: int = 30):
-    start_date = (now_local().date() - timedelta(days=days_back - 1)).isoformat()
+def get_active_cycle_start_iso() -> str:
     with closing(get_db()) as conn:
-        rows = conn.execute(
+        row = conn.execute(
             """
-            SELECT * FROM orders
-            WHERE status='history' AND created_date>=?
-            ORDER BY exported_at DESC, created_at ASC, id ASC
-            """,
-            (start_date,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+            SELECT created_at
+            FROM orders
+            WHERE status='active'
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    return row["created_at"] if row else ""
 
 
-def enumerate_rows(rows: list[dict]) -> list[dict]:
+def enumerate_daily_orders(rows: list[dict]) -> list[dict]:
     numbered = []
     for index, row in enumerate(rows, start=1):
         item = dict(row)
@@ -814,11 +710,11 @@ def delete_orders_by_ids(order_ids: list[int]) -> int:
         return cur.rowcount or 0
 
 
-def move_orders_to_history(order_ids: list[int], exported_at_iso: str | None = None) -> int:
+def move_orders_to_history(order_ids: list[int]) -> int:
     if not order_ids:
         return 0
 
-    exported_at = exported_at_iso or now_local().isoformat()
+    exported_at = now_local().isoformat()
     placeholders = ",".join(["?"] * len(order_ids))
     with closing(get_db()) as conn:
         cur = conn.execute(
@@ -833,10 +729,10 @@ def move_orders_to_history(order_ids: list[int], exported_at_iso: str | None = N
         return cur.rowcount or 0
 
 
-def get_cycle_order_by_number(order_number: int, status: str = "active") -> dict | None:
-    rows = enumerate_rows(fetch_active_cycle_orders(status=status))
+def get_order_by_daily_number(day_iso: str, daily_number: int, status: str = "active") -> dict | None:
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
     for row in rows:
-        if row["daily_number"] == order_number:
+        if row["daily_number"] == daily_number:
             return row
     return None
 
@@ -845,7 +741,7 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "order_number",
+        "daily_number",
         "created_at",
         "created_date",
         "telegram_user_id",
@@ -874,7 +770,7 @@ def build_csv_bytes_from_rows(rows: list[dict]) -> bytes:
         "status",
         "exported_at",
     ])
-    numbered_rows = enumerate_rows(rows)
+    numbered_rows = enumerate_daily_orders(rows)
     for row in numbered_rows:
         writer.writerow([
             row["daily_number"],
@@ -1053,10 +949,10 @@ def format_totals_multiline(totals: dict) -> str:
     return "\n".join(lines) if lines else "- No equipment requested"
 
 
-def build_export_filename(is_excel: bool = True) -> str:
+def build_export_filename(report_day_iso: str, is_excel: bool = True) -> str:
     stamp = now_local().strftime("%Y-%m-%d_%I-%M-%S_%p")
     ext = "xlsx" if is_excel else "csv"
-    return f"orders_export_{stamp}.{ext}"
+    return f"orders_{report_day_iso}_{stamp}.{ext}"
 
 
 def admin_home_keyboard():
@@ -1085,9 +981,9 @@ def export_orders_menu():
 
 
 def admin_message_menu():
-    info = get_active_message_info()
+    message, _ = get_active_message_info()
     rows = []
-    if info["type"]:
+    if message:
         rows.append([InlineKeyboardButton("Edit Message", callback_data="edit_message")])
         rows.append([InlineKeyboardButton("Delete Message", callback_data="delete_message")])
     else:
@@ -1124,19 +1020,16 @@ def manage_admins_menu():
 
 
 def admin_message_status_text():
-    info = get_active_message_info()
-    if not info["type"]:
+    message, active_until = get_active_message_info()
+    if not message:
         return "No active technician message."
 
-    if info["type"] == "photo":
-        body = "Current technician message:\n\n[Image message]"
-        if info["caption"]:
-            body += f"\nCaption: {info['caption']}"
-    else:
-        body = f"Current technician message:\n\n{info['text']}"
-
-    body += f"\n\nActive until: {fmt_dt_local(info['active_until'])}"
-    return body
+    expires = datetime.fromisoformat(active_until).astimezone(TZ)
+    return (
+        "Current technician message:\n\n"
+        f"{message}\n\n"
+        f"Active until: {expires.strftime('%Y-%m-%d %I:%M:%S %p')}"
+    )
 
 
 def weekly_stats_text():
@@ -1179,36 +1072,16 @@ def weekly_stats_text():
     return "\n".join(lines)
 
 
-def _items_for_row(row: dict) -> str:
-    items = []
-    for key in EQUIPMENT_ORDER[:-1]:
-        qty = int(row.get(key, 0) or 0)
-        if qty > 0:
-            items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
-
-    extra_name = (row.get("extra_item_name") or "").strip()
-    extra_qty = int(row.get("extra_item_qty", 0) or 0)
-    if extra_qty > 0:
-        items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
-
-    return ", ".join(items) if items else "No items"
-
-
-def current_cycle_orders_text():
-    cycle_start = get_active_cycle_start_iso()
-    rows = enumerate_rows(fetch_active_cycle_orders(status="active"))
-
+def orders_text_for_day(day_iso: str, title: str, status: str = "active"):
+    rows = enumerate_daily_orders(fetch_orders_for_day(day_iso, status=status))
     if not rows:
-        return (
-            "📦 Current Active Orders\n"
-            f"Cycle start: {fmt_dt_local(cycle_start)}\n\n"
-            "No active orders found in the current cycle."
-        )
+        return f"{title}\nDate: {day_iso}\n\nNo orders found."
 
     totals = equipment_totals(rows)
+
     lines = [
-        "📦 Current Active Orders",
-        f"Cycle start: {fmt_dt_local(cycle_start)}",
+        title,
+        f"Date: {day_iso}",
         f"Total orders: {len(rows)}",
         "",
         "Equipment totals:",
@@ -1218,18 +1091,79 @@ def current_cycle_orders_text():
     ]
 
     for row in rows:
-        created_display = fmt_dt_local(row.get("created_at"))
+        items = []
+        for key in EQUIPMENT_ORDER[:-1]:
+            qty = int(row.get(key, 0) or 0)
+            if qty > 0:
+                items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
+
+        extra_name = (row.get("extra_item_name") or "").strip()
+        extra_qty = int(row.get("extra_item_qty", 0) or 0)
+        if extra_qty > 0:
+            items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
+
+        item_text = ", ".join(items) if items else "No items"
+        created_display = "N/A"
+        if row.get("created_at"):
+            created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
         lines.append(
-            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {_items_for_row(row)}"
+            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
         )
 
     return "\n".join(lines)
 
 
-def order_history_text():
-    rows = fetch_history_orders(days_back=30)
+def current_cycle_orders_text():
+    cycle_start = get_active_cycle_start_iso()
+    rows = fetch_active_cycle_orders(status="active")
+
     if not rows:
-        return "🗂️ Order History\n\nNo archived orders found in the last 30 days."
+        return (
+            "📦 Current Active Orders\n"
+            "Cycle start: waiting for first new order\n\n"
+            "No active orders found in the current cycle."
+        )
+
+    numbered_rows = enumerate_daily_orders(rows)
+    totals = equipment_totals(numbered_rows)
+    lines = [
+        "📦 Current Active Orders",
+        f"Cycle start: {fmt_dt_local(cycle_start)}",
+        f"Total orders: {len(numbered_rows)}",
+        "",
+        "Equipment totals:",
+        format_totals_multiline(totals),
+        "",
+        "Order details:",
+    ]
+
+    for row in numbered_rows:
+        items = []
+        for key in EQUIPMENT_ORDER[:-1]:
+            qty = int(row.get(key, 0) or 0)
+            if qty > 0:
+                items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
+
+        extra_name = (row.get("extra_item_name") or "").strip()
+        extra_qty = int(row.get("extra_item_qty", 0) or 0)
+        if extra_qty > 0:
+            items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
+
+        item_text = ", ".join(items) if items else "No items"
+        created_display = fmt_dt_local(row.get("created_at"))
+
+        lines.append(
+            f"#{row['daily_number']} | {created_display} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
+        )
+
+    return "\n".join(lines)
+def order_history_text():
+    start_date = (now_local().date() - timedelta(days=13)).isoformat()
+    rows = fetch_orders_since(start_date, status="history")
+
+    if not rows:
+        return "🗂️ Order History\n\nNo archived orders found in the last 14 days."
 
     grouped = {}
     for row in rows:
@@ -1241,24 +1175,42 @@ def order_history_text():
                 export_day = "Unknown"
         grouped.setdefault(export_day, []).append(row)
 
-    lines = ["🗂️ Order History", "Showing archived orders from the last 30 days.", ""]
+    lines = ["🗂️ Order History", "Showing archived orders from the last 14 days.", ""]
 
-    for export_day in sorted(grouped.keys(), reverse=True):
-        export_rows = list(sorted(grouped[export_day], key=lambda r: (r.get("exported_at", ""), r.get("created_at", ""), r["id"])))
-        numbered_rows = enumerate_rows(export_rows)
+    for day_iso in sorted(grouped.keys(), reverse=True):
+        daily_rows = list(sorted(grouped[day_iso], key=lambda r: (r.get("exported_at", ""), r["created_at"], r["id"])))
+        numbered_rows = enumerate_daily_orders(daily_rows)
         totals = equipment_totals(numbered_rows)
 
-        lines.append(f"Export date: {export_day}")
+        lines.append(f"Export date: {day_iso}")
         lines.append(f"Total archived orders: {len(numbered_rows)}")
         lines.append("Equipment totals:")
         lines.append(format_totals_multiline(totals))
         lines.append("Order details:")
 
         for row in numbered_rows:
+            items = []
+            for key in EQUIPMENT_ORDER[:-1]:
+                qty = int(row.get(key, 0) or 0)
+                if qty > 0:
+                    items.append(f"{EQUIPMENT_LABELS[key]} {qty}")
+
+            extra_name = (row.get("extra_item_name") or "").strip()
+            extra_qty = int(row.get("extra_item_qty", 0) or 0)
+            if extra_qty > 0:
+                items.append(f"{extra_name or 'Additional Item'} {extra_qty}")
+
+            item_text = ", ".join(items) if items else "No items"
+            created_display = "N/A"
+            if row.get("created_at"):
+                created_display = datetime.fromisoformat(row["created_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
+            export_display = ""
+            if row.get("exported_at"):
+                export_display = datetime.fromisoformat(row["exported_at"]).astimezone(TZ).strftime("%I:%M:%S %p")
+
             lines.append(
-                f"#{row['daily_number']} | Created {fmt_dt_local(row.get('created_at'))} | "
-                f"Exported {fmt_dt_local(row.get('exported_at'))} | "
-                f"Tech {row['tech_id']} | BP {row['bp_number']} | {_items_for_row(row)}"
+                f"#{row['daily_number']} | {created_display} | Exported {export_display or 'N/A'} | Tech {row['tech_id']} | BP {row['bp_number']} | {item_text}"
             )
 
         lines.append("")
@@ -1284,7 +1236,7 @@ def list_admins_text():
 
 def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, rows: list[dict]) -> bytes:
     output = io.BytesIO()
-    numbered_rows = enumerate_rows(rows)
+    numbered_rows = enumerate_daily_orders(rows)
 
     try:
         from openpyxl import Workbook
@@ -1300,8 +1252,8 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
 
     ws_overview = wb.active
     ws_overview.title = "Overview"
-    ws_overview.append(["Cycle Start", fmt_dt_local(cycle_start_iso)])
-    ws_overview.append(["Exported At", fmt_dt_local(export_time_iso)])
+    ws_overview.append(["Report Date", report_day_iso])
+    ws_overview.append(["Exported At", now_local().strftime("%Y-%m-%d %I:%M:%S %p")])
     ws_overview.append(["Total Orders", len(numbered_rows)])
     ws_overview.append([])
     ws_overview.append(["Equipment", "Total Qty"])
@@ -1357,9 +1309,8 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
 
     ws_raw = wb.create_sheet("Raw Orders")
     ws_raw.append([
-        "order_number",
+        "daily_number",
         "created_at",
-        "created_date",
         "tech_id",
         "bp_number",
         "xb3", "xb6", "xb7", "xb8", "xb10",
@@ -1371,7 +1322,6 @@ def build_excel_summary_from_rows(cycle_start_iso: str, export_time_iso: str, ro
         ws_raw.append([
             row["daily_number"],
             row["created_at"],
-            row["created_date"],
             row["tech_id"],
             row["bp_number"],
             row["xb3"], row["xb6"], row["xb7"], row["xb8"], row["xb10"],
@@ -1412,19 +1362,17 @@ async def send_orders_export(chat_id: int, bot, cycle_start_iso: str, export_tim
 
 
 async def run_export_action(chat_id: int, bot, delete_after_export: bool):
-    cycle_start_iso = get_active_cycle_start_iso()
     export_time_iso = now_local().isoformat()
     rows = fetch_active_cycle_orders_until(export_time_iso, status="active")
 
     if not rows:
         await bot.send_message(
             chat_id=chat_id,
-            text=(
-                "No active orders found in the current cycle.\n"
-                f"Cycle start: {fmt_dt_local(cycle_start_iso)}"
-            ),
+            text="No active orders found in the current cycle.",
         )
         return
+
+    cycle_start_iso = rows[0]["created_at"]
 
     await send_orders_export(
         chat_id=chat_id,
@@ -1437,26 +1385,15 @@ async def run_export_action(chat_id: int, bot, delete_after_export: bool):
 
     order_ids = [int(r["id"]) for r in rows]
     moved_count = move_orders_to_history(order_ids, exported_at_iso=export_time_iso)
-    set_active_cycle_start_iso(export_time_iso)
 
-    if delete_after_export:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "Export completed.\n"
-                f"Archived exported orders to Order History: {moved_count}\n"
-                "The active cycle was reset from this export time."
-            ),
-        )
-    else:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "Export completed.\n"
-                f"Moved exported orders to Order History: {moved_count}\n"
-                "The active cycle was reset from this export time."
-            ),
-        )
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "Export completed.\n"
+            f"Archived exported orders to Order History: {moved_count}\n"
+            "The next new order will start a new cycle."
+        ),
+    )
 
 
 async def admin_safe_answer(query):
@@ -1563,7 +1500,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "delete_order_number"
         await admin_safe_edit_message(
             query,
-            "Send the current cycle order number to delete.\nExample: 3\n\nUse View Orders to see the current numbers.",
+            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="back_main")]])
         )
         return
@@ -1599,7 +1536,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "technician_message_create"
         await admin_safe_edit_message(
             query,
-            "Send the new technician message now.\nYou can send plain text or one image with optional caption.\nIt will expire automatically 27 hours after you send it.",
+            "Send the new message for technicians now.\nIt will expire automatically today at 11:59 PM.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
         return
@@ -1608,7 +1545,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["awaiting"] = "technician_message_edit"
         await admin_safe_edit_message(
             query,
-            "Send the updated technician message now.\nYou can send plain text or one image with optional caption.\nIt will expire automatically 27 hours after you send it.",
+            "Send the updated message for technicians now.\nIt will expire automatically today at 11:59 PM.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="message_menu")]])
         )
         return
@@ -1707,7 +1644,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text == "Delete Order":
         context.user_data["awaiting"] = "delete_order_number"
         await update.message.reply_text(
-            "Send the current cycle order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers.",
+            "Send the daily active order number to delete.\nExample: 3\n\nUse View Orders to see the current order numbers for today.",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1748,11 +1685,12 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if awaiting in ("technician_message_create", "technician_message_edit"):
-        set_technician_text_message(text)
+        set_technician_message(text)
         context.user_data.pop("awaiting", None)
-        info = get_active_message_info()
+        _, active_until = get_active_message_info()
+        expires = datetime.fromisoformat(active_until).astimezone(TZ).strftime("%Y-%m-%d %I:%M:%S %p")
         await update.message.reply_text(
-            f"Technician text message saved.\nActive until: {fmt_dt_local(info['active_until'])}",
+            f"Technician message saved.\nActive until: {expires}",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1778,22 +1716,22 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if awaiting == "delete_order_number":
         try:
-            order_number = int(text)
-            if order_number <= 0:
+            daily_number = int(text)
+            if daily_number <= 0:
                 raise ValueError
         except Exception:
             await update.message.reply_text("Enter a valid current cycle order number like 1, 2, or 3.")
             return
 
-        row = get_cycle_order_by_number(order_number, status="active")
+        row = get_order_by_daily_number(today_iso(), daily_number, status="active")
         if not row:
-            await update.message.reply_text("That current cycle order number was not found.")
+            await update.message.reply_text("That active order number was not found for today.")
             return
 
         deleted_count = delete_orders_by_ids([int(row["id"])])
         context.user_data.pop("awaiting", None)
         await update.message.reply_text(
-            f"Order #{order_number} deleted.\nRemoved records: {deleted_count}",
+            f"Order #{daily_number} deleted.\nRemoved records: {deleted_count}",
             reply_markup=admin_home_keyboard(),
         )
         return
@@ -1853,31 +1791,6 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 
-async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
-        return
-
-    awaiting = context.user_data.get("awaiting")
-    if awaiting not in ("technician_message_create", "technician_message_edit"):
-        return
-
-    if not update.message.photo:
-        await update.message.reply_text("No image received.")
-        return
-
-    file_id = update.message.photo[-1].file_id
-    caption = (update.message.caption or "").strip()
-    set_technician_photo_message(file_id, caption)
-    context.user_data.pop("awaiting", None)
-
-    info = get_active_message_info()
-    await update.message.reply_text(
-        f"Technician image message saved.\nActive until: {fmt_dt_local(info['active_until'])}",
-        reply_markup=admin_home_keyboard(),
-    )
-
-
 async def admin_post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Open admin menu"),
@@ -1895,7 +1808,6 @@ def register_admin_handlers():
     admin_bot_app.add_handler(CommandHandler("authorize", admin_authorize_command))
     admin_bot_app.add_handler(CommandHandler("myid", admin_myid_command))
     admin_bot_app.add_handler(CallbackQueryHandler(admin_callback_handler))
-    admin_bot_app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, admin_photo_handler))
     admin_bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
     admin_bot_app.add_error_handler(admin_error_handler)
     _admin_handlers_registered = True
@@ -1920,11 +1832,23 @@ def run_admin_bot():
 
 
 # ============================================================
-# WEB HELPERS
+# WEB ROUTES
 # ============================================================
-def build_popup_message() -> str:
+@app.get("/")
+def root():
+    return redirect("/webapp")
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True})
+
+
+@app.get("/webapp")
+def webapp_page():
     limits = get_limits()
-    return (
+    technician_message = get_active_technician_message()
+    popup_message = (
         "Badge is required to pick up equipment. "
         "The warehouse closes at 9:00 AM. "
         "Please check your buffer first. "
@@ -1939,64 +1863,6 @@ def build_popup_message() -> str:
         f"Screen {limits['screen']}, "
         f"Additional Item {limits['extra_item']}."
     )
-
-
-def get_telegram_file_url(bot_token: str, file_id: str) -> str | None:
-    if not bot_token or not file_id:
-        return None
-
-    try:
-        api_url = (
-            f"https://api.telegram.org/bot{bot_token}/getFile?"
-            + urllib.parse.urlencode({"file_id": file_id})
-        )
-        with urllib.request.urlopen(api_url, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-
-        if not payload.get("ok"):
-            return None
-
-        file_path = payload.get("result", {}).get("file_path")
-        if not file_path:
-            return None
-
-        return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-    except Exception as exc:
-        logger.warning("Could not fetch Telegram file url: %s", exc)
-        return None
-
-
-# ============================================================
-# WEB ROUTES
-# ============================================================
-@app.get("/")
-def root():
-    return redirect("/webapp")
-
-
-@app.get("/health")
-def health():
-    return jsonify({"ok": True})
-
-
-@app.get("/technician-message-image")
-def technician_message_image():
-    info = get_active_message_info()
-    if info["type"] != "photo" or not info["image_file_id"]:
-        return jsonify({"error": "No active technician image"}), 404
-
-    file_url = get_telegram_file_url(ADMIN_BOT_TOKEN, info["image_file_id"])
-    if not file_url:
-        return jsonify({"error": "Unable to load image"}), 404
-
-    return redirect(file_url)
-
-
-@app.get("/webapp")
-def webapp_page():
-    limits = get_limits()
-    msg_info = get_active_message_info()
-    popup_message = build_popup_message()
     prefill = {
         "telegram_user_id": request.args.get("uid", "").strip(),
         "telegram_username": request.args.get("username", "").strip(),
@@ -2005,10 +1871,7 @@ def webapp_page():
         "request_form.html",
         limits=limits,
         popup_message=popup_message,
-        technician_message=msg_info["text"],
-        technician_message_type=msg_info["type"],
-        technician_message_image_url=msg_info["image_url"],
-        technician_message_active_until=msg_info["active_until"],
+        technician_message=technician_message,
         prefill=prefill,
     )
 
@@ -2048,15 +1911,27 @@ def create_order():
     error = validate_payload(payload)
     if error:
         limits = get_limits()
-        msg_info = get_active_message_info()
+        technician_message = get_active_technician_message()
+        popup_message = (
+            "Badge is required to pick up equipment. "
+            "The warehouse closes at 9:00 AM. "
+            "Please check your buffer first. "
+            f"Maximum allowed quantities: "
+            f"Modems {limits['modems_total']} total, "
+            f"XI6 {limits['xi6']}, "
+            f"XID {limits['xid']}, "
+            f"XG2 {limits['xg2']}, "
+            f"DVR {limits['dvr_total']} total, "
+            f"XER10 {limits['xer10']}, "
+            f"ONU {limits['onu']}, "
+            f"Screen {limits['screen']}, "
+            f"Additional Item {limits['extra_item']}."
+        )
         return render_template(
             "request_form.html",
             limits=limits,
-            popup_message=build_popup_message(),
-            technician_message=msg_info["text"],
-            technician_message_type=msg_info["type"],
-            technician_message_image_url=msg_info["image_url"],
-            technician_message_active_until=msg_info["active_until"],
+            popup_message=popup_message,
+            technician_message=technician_message,
             form_data=payload,
             form_error=error,
             prefill={
@@ -2068,15 +1943,27 @@ def create_order():
     result = save_or_merge_order(payload)
     if result.get("error"):
         limits = get_limits()
-        msg_info = get_active_message_info()
+        technician_message = get_active_technician_message()
+        popup_message = (
+            "Badge is required to pick up equipment. "
+            "The warehouse closes at 9:00 AM. "
+            "Please check your buffer first. "
+            f"Maximum allowed quantities: "
+            f"Modems {limits['modems_total']} total, "
+            f"XI6 {limits['xi6']}, "
+            f"XID {limits['xid']}, "
+            f"XG2 {limits['xg2']}, "
+            f"DVR {limits['dvr_total']} total, "
+            f"XER10 {limits['xer10']}, "
+            f"ONU {limits['onu']}, "
+            f"Screen {limits['screen']}, "
+            f"Additional Item {limits['extra_item']}."
+        )
         return render_template(
             "request_form.html",
             limits=limits,
-            popup_message=build_popup_message(),
-            technician_message=msg_info["text"],
-            technician_message_type=msg_info["type"],
-            technician_message_image_url=msg_info["image_url"],
-            technician_message_active_until=msg_info["active_until"],
+            popup_message=popup_message,
+            technician_message=technician_message,
             form_data=payload,
             form_error=result["error"],
             prefill={
@@ -2098,14 +1985,10 @@ def admin_export_api():
     if token != ADMIN_ACCESS_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
 
-    date_param = (request.args.get("date") or "").strip()
-    if date_param:
-        rows = fetch_orders_for_day(date_param, status="active")
-    else:
-        rows = fetch_active_cycle_orders(status="active")
-
+    day_iso = request.args.get("date") or yesterday_iso()
+    rows = fetch_orders_for_day(day_iso, status="active")
     csv_bytes = build_csv_bytes_from_rows(rows)
-    filename = build_export_filename(is_excel=False)
+    filename = build_export_filename(day_iso, is_excel=False)
     return Response(
         csv_bytes,
         mimetype="text/csv",
@@ -2115,17 +1998,11 @@ def admin_export_api():
 
 @app.get("/admin/export/check")
 def admin_export_check():
-    date_param = (request.args.get("date") or "").strip()
-    if date_param:
-        rows = fetch_orders_for_day(date_param, status="active")
-        label = date_param
-    else:
-        rows = fetch_active_cycle_orders(status="active")
-        label = f"cycle_start={get_active_cycle_start_iso()}"
-
+    day_iso = request.args.get("date") or yesterday_iso()
+    rows = fetch_orders_for_day(day_iso, status="active")
     return jsonify({
         "ok": True,
-        "scope": label,
+        "date": day_iso,
         "orders_found": len(rows),
         "generated_at": now_local().isoformat(),
     })
