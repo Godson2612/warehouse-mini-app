@@ -1982,9 +1982,8 @@ def ensure_app_started():
         logger.info("Application startup completed.")
 
 
-ensure_app_started()
-
 if __name__ == "__main__":
+    ensure_app_started()
     logger.info("Web app starting on %s:%s", APP_HOST, APP_PORT)
     logger.info("BASE_URL=%s", BASE_URL)
     app.run(host=APP_HOST, port=APP_PORT, debug=False, use_reloader=False)
