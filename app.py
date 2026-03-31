@@ -2047,15 +2047,18 @@ def admin_export_check():
 def healthz():
     try:
         ensure_app_started()
+
         return jsonify({
             "ok": True,
             "db_path": DB_PATH,
             "owner_admin_id": str(OWNER_ADMIN_ID_ENV or ""),
+            "default_admin_ids": configured_default_admin_ids(),
             "run_admin_bot": admin_bot_app is not None,
             "run_tech_bot": tech_bot_app is not None,
             "time": datetime.now(TZ).isoformat(),
         }), 200
     except Exception as e:
+        logger.exception("Health check failed")
         return jsonify({
             "ok": False,
             "error": str(e),
