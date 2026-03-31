@@ -2082,6 +2082,7 @@ def ensure_app_started():
             return
 
         init_db()
+        ensure_configured_admins()
         logger.info(
             "Startup config | db_path=%s | owner_env=%s | default_admins=%s | run_tech_bot=%s | run_admin_bot=%s",
             DB_PATH,
