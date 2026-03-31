@@ -2043,26 +2043,25 @@ def admin_export_check():
         "generated_at": now_local().isoformat(),
     })
 
-
-@app.get("/healthz")
+@app.route("/healthz")
 def healthz():
-    owner_id = get_owner_admin_id()
     try:
-        with closing(get_db()) as conn:
-            conn.execute("SELECT 1").fetchone()
-        db_ok = True
-    except Exception as exc:
-        logger.exception("Health check DB failure: %s", exc)
-        db_ok = False
-
-    return jsonify({
-        "ok": db_ok,
-        "db_path": DB_PATH,
-        "owner_admin_id": str(owner_id) if owner_id is not None else "",
-        "run_tech_bot": tech_bot_app is not None,
-        "run_admin_bot": admin_bot_app is not None,
-        "time": now_local().isoformat(),
-    }), (200 if db_ok else 500)
+        ensure_app_started()
+        return jsonify({
+            "ok": True,
+            "db_path": DB_PATH,
+            "owner_admin_id": str(OWNER_ADMIN_ID_ENV or ""),
+            "run_admin_bot": admin_bot_app is not None,
+            "run_tech_bot": tech_bot_app is not None,
+            "time": datetime.now(TZ).isoformat(),
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "db_path": DB_PATH,
+            "time": datetime.now(TZ).isoformat(),
+        }), 500
 
 
 
