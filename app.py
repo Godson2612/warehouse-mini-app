@@ -41,14 +41,14 @@ BASE_URL = os.getenv("BASE_URL", "https://warehouse-mini-app.onrender.com").rstr
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", "8080"))
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/New_York")
-DB_PATH = os.getenv("DB_PATH", "orders.db")
+DEFAULT_DB_PATH = "/var/data/orders.db" if os.path.isdir("/var/data") else "orders.db"
+DB_PATH = os.getenv("DB_PATH", DEFAULT_DB_PATH)
 SECRET_KEY = os.getenv("SECRET_KEY", "warehouse-secret-key")
 ADMIN_ACCESS_TOKEN = os.getenv("ADMIN_TOKEN", "CHANGE_THIS_ADMIN_TOKEN").strip()
-OWNER_ADMIN_ID = os.getenv("OWNER_ADMIN_ID", "").strip()
-DEFAULT_ADMIN_IDS = os.getenv("DEFAULT_ADMIN_IDS", "").strip()
-RUN_TECH_BOT = os.getenv("RUN_TECH_BOT", "").strip().lower() in {"1", "true", "yes", "on"}
-RUN_ADMIN_BOT = os.getenv("RUN_ADMIN_BOT", "").strip().lower() in {"1", "true", "yes", "on"}
-SQLITE_TIMEOUT = float(os.getenv("SQLITE_TIMEOUT", "30"))
+OWNER_ADMIN_ID_ENV = os.getenv("OWNER_ADMIN_ID", "").strip()
+DEFAULT_ADMIN_IDS_ENV = os.getenv("DEFAULT_ADMIN_IDS", "").strip()
+RUN_TECH_BOT = os.getenv("RUN_TECH_BOT", "1").strip().lower() not in {"0", "false", "no", "off"}
+RUN_ADMIN_BOT = os.getenv("RUN_ADMIN_BOT", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 TZ = ZoneInfo(APP_TIMEZONE)
 
@@ -64,10 +64,10 @@ app.secret_key = SECRET_KEY
 tech_bot_app = None
 admin_bot_app = None
 
-if TECH_BOT_TOKEN:
+if TECH_BOT_TOKEN and RUN_TECH_BOT:
     tech_bot_app = Application.builder().token(TECH_BOT_TOKEN).build()
 
-if ADMIN_BOT_TOKEN:
+if ADMIN_BOT_TOKEN and RUN_ADMIN_BOT:
     admin_bot_app = Application.builder().token(ADMIN_BOT_TOKEN).build()
 
 _tech_handlers_registered = False
@@ -180,16 +180,62 @@ MERGE_SUM_FIELDS = [
 ]
 
 
-def get_db():
-    db_dir = os.path.dirname(DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+def parse_env_admin_ids(raw: str) -> list[int]:
+    result: list[int] = []
+    seen = set()
+    for part in (raw or "").split(","):
+        value = re.sub(r"\D", "", part.strip())
+        if not value:
+            continue
+        user_id = int(value)
+        if user_id not in seen:
+            seen.add(user_id)
+            result.append(user_id)
+    return result
 
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=SQLITE_TIMEOUT)
+
+def configured_owner_admin_id() -> int | None:
+    ids = parse_env_admin_ids(OWNER_ADMIN_ID_ENV)
+    return ids[0] if ids else None
+
+
+def configured_default_admin_ids() -> list[int]:
+    owner_id = configured_owner_admin_id()
+    ids = []
+    for user_id in parse_env_admin_ids(DEFAULT_ADMIN_IDS_ENV):
+        if owner_id is not None and user_id == owner_id:
+            continue
+        ids.append(user_id)
+    return ids
+
+
+def ensure_db_parent_dir():
+    parent = os.path.dirname(DB_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def apply_sqlite_pragmas(conn):
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
+    try:
+        conn.execute("PRAGMA busy_timeout=8000;")
+    except Exception:
+        pass
+
+
+
+def get_db():
+    ensure_db_parent_dir()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=8)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA foreign_keys = ON")
+    apply_sqlite_pragmas(conn)
     return conn
 
 
@@ -250,79 +296,6 @@ def init_db():
 
         conn.commit()
 
-
-def ensure_owner_from_env() -> int | None:
-    raw = OWNER_ADMIN_ID.strip()
-    if not raw:
-        logger.warning("OWNER_ADMIN_ID is not set; automatic owner recovery is disabled.")
-        return None
-
-    if not raw.isdigit():
-        logger.error("OWNER_ADMIN_ID must be numeric. Current value: %r", raw)
-        return None
-
-    owner_user_id = int(raw)
-    with closing(get_db()) as conn:
-        conn.execute(
-            """
-            INSERT INTO admin_users(telegram_user_id, telegram_username, role, added_at, added_by)
-            VALUES(?, COALESCE((SELECT telegram_username FROM admin_users WHERE telegram_user_id=?), ''), 'owner', ?, ?)
-            ON CONFLICT(telegram_user_id) DO UPDATE SET role='owner'
-            """,
-            (owner_user_id, owner_user_id, now_local().isoformat(), owner_user_id),
-        )
-        set_setting_with_conn(conn, "owner_admin_id", str(owner_user_id))
-        conn.execute(
-            "UPDATE admin_users SET role='admin' WHERE telegram_user_id<>? AND role='owner'",
-            (owner_user_id,),
-        )
-        conn.commit()
-    logger.info("Owner ensured from OWNER_ADMIN_ID=%s", owner_user_id)
-    return owner_user_id
-
-
-def ensure_default_admins_from_env(owner_user_id: int | None = None):
-    admin_ids = parse_admin_ids(DEFAULT_ADMIN_IDS)
-    if owner_user_id is not None:
-        admin_ids = [user_id for user_id in admin_ids if user_id != owner_user_id]
-
-    if not admin_ids:
-        if DEFAULT_ADMIN_IDS.strip():
-            logger.info("DEFAULT_ADMIN_IDS provided, but no additional valid admin ids were found.")
-        return
-
-    now_iso = now_local().isoformat()
-    with closing(get_db()) as conn:
-        for admin_user_id in admin_ids:
-            conn.execute(
-                """
-                INSERT INTO admin_users(telegram_user_id, telegram_username, role, added_at, added_by)
-                VALUES(?, COALESCE((SELECT telegram_username FROM admin_users WHERE telegram_user_id=?), ''), 'admin', ?, ?)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET role=CASE WHEN admin_users.role='owner' THEN 'owner' ELSE 'admin' END
-                """,
-                (admin_user_id, admin_user_id, now_iso, owner_user_id),
-            )
-        conn.commit()
-    logger.info("Default admins ensured from DEFAULT_ADMIN_IDS=%s", ",".join(str(i) for i in admin_ids))
-
-
-
-
-def parse_admin_ids(raw: str) -> list[int]:
-    ids: list[int] = []
-    seen: set[int] = set()
-    for part in (raw or "").split(','):
-        value = part.strip()
-        if not value:
-            continue
-        if not value.isdigit():
-            logger.warning("Ignoring non-numeric admin id in DEFAULT_ADMIN_IDS: %r", value)
-            continue
-        user_id = int(value)
-        if user_id not in seen:
-            ids.append(user_id)
-            seen.add(user_id)
-    return ids
 
 def get_setting(key: str, default: str = "") -> str:
     with closing(get_db()) as conn:
@@ -404,6 +377,39 @@ def add_admin_user(user_id: int, username: str = "", role: str = "admin", added_
         )
         if role == "owner":
             set_setting_with_conn(conn, "owner_admin_id", str(user_id))
+        conn.commit()
+
+
+
+def ensure_configured_admins():
+    owner_id = configured_owner_admin_id()
+    default_admin_ids = configured_default_admin_ids()
+
+    if owner_id is None and not default_admin_ids:
+        return
+
+    with closing(get_db()) as conn:
+        if owner_id is not None:
+            conn.execute(
+                """
+                INSERT INTO admin_users(telegram_user_id, telegram_username, role, added_at, added_by)
+                VALUES(?, '', 'owner', ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET role='owner'
+                """,
+                (owner_id, now_local().isoformat(), owner_id),
+            )
+            set_setting_with_conn(conn, "owner_admin_id", str(owner_id))
+
+        for admin_id in default_admin_ids:
+            conn.execute(
+                """
+                INSERT INTO admin_users(telegram_user_id, telegram_username, role, added_at, added_by)
+                VALUES(?, '', 'admin', ?, ?)
+                ON CONFLICT(telegram_user_id) DO NOTHING
+                """,
+                (admin_id, now_local().isoformat(), owner_id),
+            )
+
         conn.commit()
 
 
@@ -2040,21 +2046,24 @@ def admin_export_check():
 
 @app.get("/healthz")
 def healthz():
+    owner_id = get_owner_admin_id()
     try:
         with closing(get_db()) as conn:
             conn.execute("SELECT 1").fetchone()
-            owner_id = get_setting_from_conn(conn, "owner_admin_id", "").strip()
-        return jsonify({
-            "ok": True,
-            "db_path": DB_PATH,
-            "owner_admin_id": owner_id,
-            "run_tech_bot": RUN_TECH_BOT,
-            "run_admin_bot": RUN_ADMIN_BOT,
-            "time": now_local().isoformat(),
-        }), 200
+        db_ok = True
     except Exception as exc:
-        logger.exception("Health check failed")
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        logger.exception("Health check DB failure: %s", exc)
+        db_ok = False
+
+    return jsonify({
+        "ok": db_ok,
+        "db_path": DB_PATH,
+        "owner_admin_id": str(owner_id) if owner_id is not None else "",
+        "run_tech_bot": tech_bot_app is not None,
+        "run_admin_bot": admin_bot_app is not None,
+        "time": now_local().isoformat(),
+    }), (200 if db_ok else 500)
+
 
 
 # ============================================================
@@ -2064,7 +2073,7 @@ _started = False
 _start_lock = threading.Lock()
 
 
-def ensure_app_started(start_bots: bool = False):
+def ensure_app_started():
     global _started
     if _started:
         return
@@ -2073,40 +2082,29 @@ def ensure_app_started(start_bots: bool = False):
             return
 
         init_db()
-        owner_user_id = ensure_owner_from_env()
-        ensure_default_admins_from_env(owner_user_id)
+        logger.info(
+            "Startup config | db_path=%s | owner_env=%s | default_admins=%s | run_tech_bot=%s | run_admin_bot=%s",
+            DB_PATH,
+            OWNER_ADMIN_ID_ENV or "",
+            ",".join(str(x) for x in configured_default_admin_ids()),
+            tech_bot_app is not None,
+            admin_bot_app is not None,
+        )
 
-        should_run_tech = tech_bot_app is not None and (start_bots or RUN_TECH_BOT)
-        should_run_admin = admin_bot_app is not None and (start_bots or RUN_ADMIN_BOT)
-
-        if should_run_tech:
+        if tech_bot_app is not None:
             tech_thread = threading.Thread(target=run_tech_bot, daemon=True, name="tech-bot-thread")
             tech_thread.start()
-            logger.info("Tech bot thread started.")
-        else:
-            logger.info("Tech bot thread skipped.")
 
-        if should_run_admin:
+        if admin_bot_app is not None:
             admin_thread = threading.Thread(target=run_admin_bot, daemon=True, name="admin-bot-thread")
             admin_thread.start()
-            logger.info("Admin bot thread started.")
-        else:
-            logger.info("Admin bot thread skipped.")
 
         _started = True
         logger.info("Application startup completed.")
 
 
-@app.before_request
-def _ensure_started_before_request():
-    ensure_app_started(start_bots=False)
-
-
-ensure_app_started(start_bots=False)
-
-
 if __name__ == "__main__":
-    ensure_app_started(start_bots=True)
+    ensure_app_started()
     logger.info("Web app starting on %s:%s", APP_HOST, APP_PORT)
     logger.info("BASE_URL=%s", BASE_URL)
     app.run(host=APP_HOST, port=APP_PORT, debug=False, use_reloader=False)
